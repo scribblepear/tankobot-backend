@@ -27,16 +27,7 @@ app = FastAPI(title="Semantic Manga Recommender API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://scribblepear.github.io",  # Your GitHub Pages domain
-        "http://localhost:*",               # Local development
-        "http://127.0.0.1:*",              # Local development
-        "file://",                          # For opening HTML files directly
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
-)
+
 # Global variables for storing loaded data
 db_mangas = None
 mangas_df = None
