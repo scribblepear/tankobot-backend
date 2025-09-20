@@ -26,10 +26,21 @@ app = FastAPI(title="Semantic Manga Recommender API")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend URL
+    allow_origins=[
+        "https://scribblepear.github.io",      # Your GitHub Pages domain
+        "https://*.vercel.app",                 # Any Vercel preview URLs
+        "https://tankobot-api.vercel.app",     # Your production Vercel URL
+        "http://localhost:3000",                # Local React development
+        "http://localhost:5173",                # Local Vite development
+        "http://127.0.0.1:3000",               # Alternative local
+        "http://127.0.0.1:5173",               # Alternative local Vite
+        "file://",                              # Direct file access
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,  # Cache preflight requests for 24 hours
 )
 
 # Global variables for storing loaded data
