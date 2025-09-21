@@ -18,8 +18,14 @@ from dotenv import load_dotenv
 # Try different import methods for embeddings
 try:
     from langchain_openai import OpenAIEmbeddings
+    print("Using langchain_openai for embeddings")
 except ImportError:
-    from langchain.embeddings import OpenAIEmbeddings
+    try:
+        from langchain_community.embeddings import OpenAIEmbeddings
+        print("Using langchain_community for embeddings")
+    except ImportError:
+        from langchain.embeddings import OpenAIEmbeddings
+        print("Using langchain for embeddings")
 
 # Load environment variables
 load_dotenv()
@@ -175,26 +181,53 @@ def initialize_database():
         for i, doc in enumerate(documents):
             doc.metadata["id"] = str(i)
         
-        # Create embeddings with error handling
+        # Create embeddings with multiple fallback approaches
         print("Creating embeddings...")
+        embeddings = None
+        
+        # Set environment variable explicitly
+        os.environ["OPENAI_API_KEY"] = api_key
+        
+        # Approach 1: Try with minimal parameters (usually works best)
         try:
-            # Try with model parameter first
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                openai_api_key=api_key
-            )
-            print("Created embeddings with text-embedding-3-small model")
-        except TypeError as e:
-            # If model parameter causes issues, try without it
-            print(f"Note: Using default embedding model due to: {e}")
-            embeddings = OpenAIEmbeddings(
-                openai_api_key=api_key
-            )
-        except Exception as e:
-            print(f"Error creating embeddings: {e}")
-            print("Trying minimal parameters...")
-            # Try one more time with minimal parameters
             embeddings = OpenAIEmbeddings()
+            print("Created embeddings using default settings")
+        except Exception as e:
+            print(f"Approach 1 failed: {e}")
+        
+        # Approach 2: Try with explicit API key
+        if embeddings is None:
+            try:
+                embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+                print("Created embeddings with explicit API key")
+            except Exception as e:
+                print(f"Approach 2 failed: {e}")
+        
+        # Approach 3: Try with model parameter
+        if embeddings is None:
+            try:
+                embeddings = OpenAIEmbeddings(
+                    openai_api_key=api_key,
+                    model="text-embedding-3-small"
+                )
+                print("Created embeddings with text-embedding-3-small model")
+            except Exception as e:
+                print(f"Approach 3 failed: {e}")
+        
+        # Approach 4: Try to work around proxy issues
+        if embeddings is None:
+            try:
+                import openai
+                openai.api_key = api_key
+                # Try creating embeddings without any httpx proxy config
+                embeddings = OpenAIEmbeddings(
+                    openai_api_key=api_key,
+                    model_kwargs={"timeout": 30}
+                )
+                print("Created embeddings with timeout config")
+            except Exception as e:
+                print(f"Approach 4 failed: {e}")
+                raise Exception("Could not create OpenAI embeddings with any method")
         
         # Create vector store
         print("Creating vector store...")
