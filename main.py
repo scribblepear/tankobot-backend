@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import urllib.request
 from pathlib import Path
 
 from langchain_community.document_loaders import TextLoader
@@ -23,20 +24,13 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Semantic Manga Recommender API")
 
-# Configure CORS - Updated for production
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://scribblepear.github.io",  # Your GitHub Pages domain
-        "http://localhost:3000",  # Local development
-        "http://localhost:8000",  # Local development
-        "http://127.0.0.1:3000",  # Local development
-        "http://127.0.0.1:8000",  # Local development
-    ],
+    allow_origins=["*"],  # In production, replace with your frontend URL
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly list methods
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # Global variables for storing loaded data
@@ -61,25 +55,122 @@ class SearchResponse(BaseModel):
     results: List[MangaResponse]
     count: int
 
+def download_data_files():
+    """Download data files from GitHub Releases"""
+    import urllib.request
+    import requests
+    import zipfile
+    os.makedirs("data", exist_ok=True)
+    
+    # UPDATE THESE URLs after uploading all files to GitHub Releases
+    files_to_download = {
+        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/chroma_db.zip": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/chroma_db.zip"
+    }
+    
+    for file_path, url in files_to_download.items():
+        if not os.path.exists(file_path):
+            print(f"Downloading {file_path} from {url}...")
+            try:
+                # Try using curl or wget for better GitHub compatibility
+                import subprocess
+                
+                # Try curl first (more commonly available)
+                try:
+                    result = subprocess.run(
+                        ["curl", "-L", "-o", file_path, url],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+                    if result.returncode == 0:
+                        print(f"Successfully downloaded with curl")
+                    else:
+                        raise Exception(f"Curl failed: {result.stderr}")
+                except (FileNotFoundError, Exception) as e:
+                    # Fallback to wget
+                    try:
+                        result = subprocess.run(
+                            ["wget", "-O", file_path, url],
+                            capture_output=True,
+                            text=True,
+                            timeout=300
+                        )
+                        if result.returncode == 0:
+                            print(f"Successfully downloaded with wget")
+                        else:
+                            raise Exception(f"Wget failed: {result.stderr}")
+                    except (FileNotFoundError, Exception) as e2:
+                        # Final fallback to requests with different approach
+                        print("Curl/wget not available, using requests...")
+                        session = requests.Session()
+                        session.headers.update({
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        })
+                        
+                        response = session.get(url, stream=True, allow_redirects=True)
+                        response.raise_for_status()
+                        
+                        with open(file_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                                if chunk:
+                                    f.write(chunk)
+                        print(f"Successfully downloaded with requests")
+                
+                # Verify file size
+                file_size = os.path.getsize(file_path)
+                print(f"File size: {file_size / 1024 / 1024:.2f} MB")
+                
+                # Verify text file content
+                if file_path.endswith('.txt') and file_size < 1000:
+                    print(f"WARNING: Text file seems too small ({file_size} bytes)")
+                    # Delete the bad file so it re-downloads next time
+                    os.remove(file_path)
+                    raise Exception(f"Downloaded file too small, likely corrupted")
+                # Extract the zip file
+                print(f"Extracting {file_path}...")
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    # Extract to data directory
+                    zip_ref.extractall("data/")
+                print(f"Extracted chroma_db successfully")
+                
+                # Remove the zip file to save space
+                os.remove(file_path)
+                        
+            except Exception as e:
+                print(f"Failed to download {file_path}: {e}")
+                # Don't fail completely if chroma_db fails - can fall back to text search
+                if "chroma_db" not in file_path and "mangas_with_emotions" in file_path:
+                    return False
+    
+    # Verify critical files exist
+    if not os.path.exists("data/mangas_with_emotions.csv"):
+        print("Critical file mangas_with_emotions.csv missing!")
+        return False
+    
+    return True
+
 def initialize_database():
     """Initialize the vector database and load manga data"""
     global db_mangas, mangas_df, embeddings
     
-    print("Initializing database...")
+    print("=" * 50)
+    print("INITIALIZING DATABASE")
+    print("=" * 50)
     
-    # Check if required files exist
+    # Try to download files if they don't exist
     if not os.path.exists("data/mangas_with_emotions.csv"):
-        print("Warning: mangas_with_emotions.csv not found. Using fallback data.")
-        # You can implement fallback logic here
-        return False
-    
-    if not os.path.exists("data/tagged_description.txt"):
-        print("Warning: tagged_description.txt not found.")
-        return False
+        print("Data files not found locally, attempting to download...")
+        if not download_data_files():
+            print("Failed to download critical data files")
+            return False
     
     try:
         # Load manga data
+        print("Loading manga data...")
         mangas_df = pd.read_csv("data/mangas_with_emotions.csv")
+        print(f"✓ Loaded {len(mangas_df)} manga records")
         
         # Ensure uid column exists
         if "uid" not in mangas_df.columns:
@@ -96,44 +187,60 @@ def initialize_database():
         else:
             mangas_df["large_cover"] = "/static/cover-not-found.jpg"
         
-        # Load and process documents
-        raw_documents = TextLoader("data/tagged_description.txt").load()
+        # Try to load pre-built vector database if it exists
+        api_key = os.getenv("OPENAI_API_KEY")
+        chroma_dir = "data/chroma_db"
         
-        # Remove duplicates
-        unique_texts = list({doc.page_content.strip() for doc in raw_documents})
+        if api_key and os.path.exists(chroma_dir):
+            try:
+                print("\nLoading pre-built vector database...")
+                from langchain_openai import OpenAIEmbeddings
+                from langchain_community.vectorstores import Chroma
+                
+                # Load embeddings function (needed for searching)
+                embeddings = OpenAIEmbeddings(
+                    openai_api_key=api_key,
+                    model="text-embedding-3-small"
+                )
+                
+                # Load the existing Chroma database
+                db_mangas = Chroma(
+                    persist_directory=chroma_dir,
+                    embedding_function=embeddings
+                )
+                
+                # Test it works
+                test_results = db_mangas.similarity_search("test", k=1)
+                print(f"✓ Vector database loaded successfully!")
+                print(f"✓ Database contains pre-computed embeddings")
+                
+            except Exception as e:
+                print(f"✗ Failed to load vector database: {e}")
+                db_mangas = None
+        else:
+            reasons = []
+            if not api_key:
+                reasons.append("no OpenAI API key")
+            if not os.path.exists(tagged_file):
+                reasons.append("tagged_description.txt not found")
+            elif os.path.getsize(tagged_file) == 0:
+                reasons.append("tagged_description.txt is empty")
+            print(f"Skipping embeddings ({', '.join(reasons)})")
+            print("Will use text-based search instead")
+            db_mangas = None
         
-        documents = [
-            Document(page_content=text, metadata={"source": "tagged_description.txt"})
-            for text in unique_texts
-        ]
+        print("\n" + "=" * 50)
+        print("DATABASE INITIALIZATION COMPLETE")
+        print(f"✓ Manga data loaded: {len(mangas_df)} records")
+        print(f"✓ Search mode: {'Semantic (embeddings)' if db_mangas else 'Text-based'}")
+        print("=" * 50 + "\n")
         
-        # Split documents
-        text_splitter = CharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-            separator="\n"
-        )
-        documents = text_splitter.split_documents(documents)
-        
-        # Assign IDs
-        for i, doc in enumerate(documents):
-            doc.metadata["id"] = str(i)
-        
-        # Create embeddings
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        
-        # Create vector store
-        db_mangas = Chroma.from_documents(
-            documents,
-            embedding=embeddings,
-            ids=[doc.metadata["id"] for doc in documents]
-        )
-        
-        print("Database initialized successfully!")
         return True
         
     except Exception as e:
-        print(f"Error initializing database: {e}")
+        print(f"✗ Error initializing database: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return False
 
 def retrieve_semantic_recommendations(
@@ -141,32 +248,92 @@ def retrieve_semantic_recommendations(
     initial_top_k: int = 50,
     final_top_k: int = 16
 ) -> pd.DataFrame:
-    """Retrieve manga recommendations based on semantic search"""
+    """Retrieve manga recommendations using embeddings or text search"""
     
-    if db_mangas is None or mangas_df is None:
+    if mangas_df is None or mangas_df.empty:
         return pd.DataFrame()
     
+    # Try embeddings first if available
+    if db_mangas is not None:
+        try:
+            print(f"Using semantic search for: {query}")
+            # Perform similarity search
+            recs = db_mangas.similarity_search(query, k=initial_top_k)
+            manga_uids = []
+            
+            for rec in recs:
+                content = rec.page_content.strip()
+                # Extract UID from the content (should be at the start)
+                match = re.match(r'^(\d+):', content)
+                if match:
+                    uid_num = int(match.group(1))
+                    if uid_num in mangas_df["uid"].values:
+                        manga_uids.append(uid_num)
+            
+            # Get manga details for found UIDs
+            if manga_uids:
+                # Preserve order of results
+                manga_recs = mangas_df[mangas_df["uid"].isin(manga_uids)]
+                # Sort by the order they appeared in search results
+                manga_recs = manga_recs.set_index('uid').loc[manga_uids].reset_index()
+                return manga_recs.head(final_top_k)
+                
+        except Exception as e:
+            print(f"Semantic search failed, falling back to text search: {e}")
+    
+    # Fallback to text search
+    print(f"Using text-based search for: {query}")
     try:
-        # Perform similarity search
-        recs = db_mangas.similarity_search(query, k=initial_top_k)
-        manga_list = []
+        query_lower = query.lower()
+        query_words = [w for w in query_lower.split() if len(w) > 2]  # Filter short words
         
-        for rec in recs:
-            content = rec.page_content.strip()
-            # Extract UID from the content
-            match = re.search(r'\d+', content)
-            if match:
-                uid_num = int(match.group())
-                if uid_num in mangas_df["uid"].values:
-                    manga_list.append(uid_num)
+        # Score manga based on text matching
+        scored_results = []
         
-        # Filter mangas by matched UIDs
-        manga_recs = mangas_df[mangas_df["uid"].isin(manga_list)].head(final_top_k)
+        # For performance, sample if dataset is large
+        sample_size = min(15000, len(mangas_df))  # Check up to 15k manga
+        if len(mangas_df) > sample_size:
+            sample_df = mangas_df.sample(n=sample_size, random_state=42)
+        else:
+            sample_df = mangas_df
         
-        return manga_recs
+        for idx, row in sample_df.iterrows():
+            score = 0
+            title = str(row.get('title', '')).lower()
+            description = str(row.get('description', '')).lower()
+            tags = str(row.get('tags', '')).lower()
+            
+            # Exact phrase match gets highest score
+            if query_lower in title:
+                score += 100
+            elif query_lower in description:
+                score += 50
+            elif query_lower in tags:
+                score += 30
+            
+            # Individual word matches
+            for word in query_words:
+                if word in title:
+                    score += 10
+                if word in description:
+                    score += 5
+                if word in tags:
+                    score += 3
+            
+            if score > 0:
+                scored_results.append((score, idx))
         
+        # Sort by score and get top results
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        top_indices = [idx for _, idx in scored_results[:final_top_k]]
+        
+        if top_indices:
+            return mangas_df.loc[top_indices]
+        else:
+            return pd.DataFrame()
+            
     except Exception as e:
-        print(f"Error in semantic search: {e}")
+        print(f"Error in text search: {e}")
         return pd.DataFrame()
 
 @app.on_event("startup")
@@ -174,7 +341,8 @@ async def startup_event():
     """Initialize database on startup"""
     success = initialize_database()
     if not success:
-        print("Warning: Database initialization incomplete. Some features may not work.")
+        print("WARNING: Database initialization incomplete.")
+        print("The API will still run but search functionality may be limited.")
 
 @app.get("/")
 async def root():
@@ -182,25 +350,16 @@ async def root():
     return {
         "status": "active",
         "service": "Semantic Manga Recommender API",
-        "database_loaded": db_mangas is not None,
-        "message": "API is running successfully"
-    }
-
-@app.get("/health")
-async def health_check():
-    """Additional health check endpoint"""
-    return {
-        "status": "healthy",
-        "database_ready": db_mangas is not None and mangas_df is not None
+        "database_loaded": mangas_df is not None and not mangas_df.empty,
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "total_manga": len(mangas_df) if mangas_df is not None else 0
     }
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_manga(request: SearchRequest):
-    """
-    Search for manga based on semantic similarity to the query
-    """
+    """Search for manga using semantic or text search"""
     
-    if db_mangas is None or mangas_df is None:
+    if mangas_df is None or mangas_df.empty:
         raise HTTPException(
             status_code=503,
             detail="Database not initialized. Please try again later."
@@ -213,10 +372,10 @@ async def search_manga(request: SearchRequest):
         )
     
     try:
-        # Get recommendations
+        # Use the unified search function
         recommendations = retrieve_semantic_recommendations(
             query=request.query,
-            final_top_k=request.limit
+            final_top_k=request.limit or 16
         )
         
         if recommendations.empty:
@@ -225,6 +384,13 @@ async def search_manga(request: SearchRequest):
         # Convert to response format
         results = []
         for _, row in recommendations.iterrows():
+            # Process tags
+            tags = row.get("tags", "")
+            if pd.notna(tags) and tags:
+                tags = str(tags).strip()
+            else:
+                tags = ""
+            
             manga = MangaResponse(
                 uid=int(row.get("uid", 0)),
                 title=str(row.get("title", "Unknown Title")),
@@ -232,7 +398,7 @@ async def search_manga(request: SearchRequest):
                 cover=str(row.get("large_cover", "/static/cover-not-found.jpg")),
                 rating=float(row.get("rating")) if pd.notna(row.get("rating")) else None,
                 year=int(row.get("year")) if pd.notna(row.get("year")) else None,
-                tags=str(row.get("tags", ""))
+                tags=tags
             )
             results.append(manga)
         
@@ -245,7 +411,7 @@ async def search_manga(request: SearchRequest):
         print(f"Search error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred during search: {str(e)}"
+            detail="An error occurred during search"
         )
 
 @app.get("/api/manga/{uid}")
@@ -292,22 +458,67 @@ async def get_stats():
     if mangas_df is None:
         return {
             "total_manga": 0,
-            "database_loaded": False
+            "database_loaded": False,
+            "search_mode": "none"
         }
     
     return {
         "total_manga": len(mangas_df),
         "database_loaded": True,
-        "available_tags": mangas_df["tags"].value_counts().head(10).to_dict() if "tags" in mangas_df.columns else {},
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "available_tags": mangas_df["tags"].value_counts().head(20).to_dict() if "tags" in mangas_df.columns else {},
     }
 
-# Add OPTIONS handler for CORS preflight
-@app.options("/{path:path}")
-async def options_handler():
-    return {"message": "OK"}
+@app.get("/debug/status")
+async def debug_status():
+    """Debug endpoint to check initialization status"""
+    
+    return {
+        "database_loaded": db_mangas is not None,
+        "dataframe_loaded": mangas_df is not None and not mangas_df.empty,
+        "embeddings_loaded": embeddings is not None,
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "env_vars": {
+            "OPENAI_API_KEY": "SET" if os.getenv("OPENAI_API_KEY") else "NOT SET",
+        },
+        "files": {
+            "data_dir_exists": os.path.exists("data"),
+            "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
+            "txt_exists": os.path.exists("data/tagged_description.txt"),
+            "csv_size_mb": os.path.getsize("data/mangas_with_emotions.csv") / 1024 / 1024 if os.path.exists("data/mangas_with_emotions.csv") else 0,
+            "txt_size_mb": os.path.getsize("data/tagged_description.txt") / 1024 / 1024 if os.path.exists("data/tagged_description.txt") else 0,
+        },
+        "dataframe_info": {
+            "rows": len(mangas_df) if mangas_df is not None else 0,
+            "columns": list(mangas_df.columns) if mangas_df is not None else []
+        }
+    }
+
+@app.get("/debug/test-search/{query}")
+async def test_search(query: str):
+    """Test endpoint to debug search functionality"""
+    
+    if mangas_df is None:
+        return {"error": "Database not loaded"}
+    
+    results = retrieve_semantic_recommendations(query, final_top_k=5)
+    
+    if results.empty:
+        return {"query": query, "results": "No results found"}
+    
+    return {
+        "query": query,
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "results": [
+            {
+                "title": row.get("title"),
+                "uid": row.get("uid"),
+                "description": str(row.get("description", ""))[:200]
+            }
+            for _, row in results.iterrows()
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    # Railway will set PORT environment variable
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
