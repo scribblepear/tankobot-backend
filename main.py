@@ -1,5 +1,3 @@
-# backend/main.py
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -8,6 +6,7 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import urllib.request
 from pathlib import Path
 
 from langchain_community.document_loaders import TextLoader
@@ -23,15 +22,17 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Semantic Manga Recommender API")
 
-# Configure CORS - Updated to include your GitHub Pages URL
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://scribblepear.github.io",
-        "http://localhost:*",
-        "http://127.0.0.1:*",
-        "file://"
-    ],  # ← Make sure this closing bracket is here
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+        "*"  # Be careful with this in production
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -60,6 +61,33 @@ class SearchResponse(BaseModel):
     results: List[MangaResponse]
     count: int
 
+def download_data_files():
+    """Download data files from Google Drive if they don't exist"""
+    os.makedirs("data", exist_ok=True)
+    
+    # Google Drive direct download links
+    files_to_download = {
+        "data/mangas_cleaned.csv": "https://drive.google.com/uc?export=download&id=1TbS-JUhEX2aExdL1ELIorbI5ARuDWitS",
+        "data/mangas_with_emotions.csv": "https://drive.google.com/uc?export=download&id=1KdhLZYvoRtbrMV-wOqPGzqIAzJK7qDs2"
+    }
+    
+    for file_path, url in files_to_download.items():
+        if not os.path.exists(file_path):
+            print(f"Downloading {file_path}...")
+            try:
+                urllib.request.urlretrieve(url, file_path)
+                print(f"Successfully downloaded {file_path}")
+            except Exception as e:
+                print(f"Failed to download {file_path}: {e}")
+                return False
+    
+    # Move tagged_description.txt to data folder if it's in root
+    if os.path.exists("tagged_description.txt") and not os.path.exists("data/tagged_description.txt"):
+        print("Moving tagged_description.txt to data folder...")
+        os.rename("tagged_description.txt", "data/tagged_description.txt")
+    
+    return True
+
 def initialize_database():
     """Initialize the vector database and load manga data"""
     global db_mangas, mangas_df, embeddings
@@ -69,7 +97,6 @@ def initialize_database():
     # Check if required files exist
     if not os.path.exists("data/mangas_with_emotions.csv"):
         print("Warning: mangas_with_emotions.csv not found. Using fallback data.")
-        # You can implement fallback logic here
         return False
     
     if not os.path.exists("data/tagged_description.txt"):
@@ -135,6 +162,20 @@ def initialize_database():
         print(f"Error initializing database: {e}")
         return False
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    # Download files first
+    print("Checking for data files...")
+    download_success = download_data_files()
+    if not download_success:
+        print("Warning: Could not download all data files")
+    
+    # Then initialize database
+    success = initialize_database()
+    if not success:
+        print("Warning: Database initialization incomplete. Some features may not work.")
+
 def retrieve_semantic_recommendations(
     query: str,
     initial_top_k: int = 50,
@@ -167,13 +208,6 @@ def retrieve_semantic_recommendations(
     except Exception as e:
         print(f"Error in semantic search: {e}")
         return pd.DataFrame()
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database on startup"""
-    success = initialize_database()
-    if not success:
-        print("Warning: Database initialization incomplete. Some features may not work.")
 
 @app.get("/")
 async def root():
@@ -309,5 +343,3 @@ async def debug_files():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-app = app
