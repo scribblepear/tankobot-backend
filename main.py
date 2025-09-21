@@ -65,9 +65,9 @@ def download_data_files():
     # Go to: https://github.com/scribblepear/tankobot/releases
     # Upload: mangas_cleaned.csv, mangas_with_emotions.csv, and tagged_description.txt
     files_to_download = {
-        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_cleaned.csv",
-        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_with_emotions.csv",
-        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot/releases/download/v1.0/tagged_description.txt"
+        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/tagged_description.txt"
     }
     
     for file_path, url in files_to_download.items():
