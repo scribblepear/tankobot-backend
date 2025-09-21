@@ -101,7 +101,7 @@ def download_data_files():
 
 def initialize_database():
     """Initialize the vector database and load manga data"""
-    global db_mangas, mangas_df, embeddings
+    global db_mangas, mangas_df, embeddings, last_error
     
     print("Initializing database...")
     
@@ -109,6 +109,7 @@ def initialize_database():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         print("ERROR: OPENAI_API_KEY not found in environment variables!")
+        last_error = "OPENAI_API_KEY not found"
         return False
     else:
         print(f"OpenAI API key found: {api_key[:8]}...")
@@ -116,6 +117,7 @@ def initialize_database():
     # Check if required files exist
     if not os.path.exists("data/mangas_with_emotions.csv"):
         print("Warning: mangas_with_emotions.csv not found. Using fallback data.")
+        last_error = "mangas_with_emotions.csv not found"
         return False
     
     if not os.path.exists("data/tagged_description.txt"):
@@ -131,6 +133,7 @@ def initialize_database():
             print("Successfully created tagged_description.txt")
         except Exception as e:
             print(f"Could not create tagged_description.txt: {e}")
+            last_error = f"Could not create tagged_description.txt: {e}"
             return False
     
     try:
@@ -159,23 +162,48 @@ def initialize_database():
         raw_documents = TextLoader("data/tagged_description.txt").load()
         print(f"Loaded {len(raw_documents)} documents")
         
-        # Remove duplicates
-        unique_texts = list({doc.page_content.strip() for doc in raw_documents})
+        # Check if we need to split the single document differently
+        if len(raw_documents) == 1:
+            # Split by newlines to get individual manga descriptions
+            text_content = raw_documents[0].page_content
+            lines = text_content.strip().split('\n')
+            documents = [
+                Document(page_content=line.strip(), metadata={"source": "tagged_description.txt"})
+                for line in lines if line.strip()
+            ]
+            print(f"Split into {len(documents)} individual manga descriptions")
+        else:
+            # Remove duplicates
+            unique_texts = list({doc.page_content.strip() for doc in raw_documents})
+            documents = [
+                Document(page_content=text, metadata={"source": "tagged_description.txt"})
+                for text in unique_texts
+            ]
+            print(f"Unique documents: {len(documents)}")
         
-        documents = [
-            Document(page_content=text, metadata={"source": "tagged_description.txt"})
-            for text in unique_texts
-        ]
-        print(f"Unique documents: {len(documents)}")
-        
-        # Split documents
+        # Only split if documents are too long
+        final_documents = []
         text_splitter = CharacterTextSplitter(
             chunk_size=500,
             chunk_overlap=50,
             separator="\n"
         )
-        documents = text_splitter.split_documents(documents)
-        print(f"Split into {len(documents)} chunks")
+        
+        for doc in documents:
+            if len(doc.page_content) > 500:
+                split_docs = text_splitter.split_documents([doc])
+                final_documents.extend(split_docs)
+            else:
+                final_documents.append(doc)
+        
+        documents = final_documents
+        print(f"Final document count: {len(documents)}")
+        
+        # Ensure we have documents to embed
+        if len(documents) == 0:
+            print("ERROR: No documents to embed!")
+            last_error = "No documents to embed after splitting"
+            return False
         
         # Assign IDs
         for i, doc in enumerate(documents):
@@ -188,46 +216,62 @@ def initialize_database():
         # Set environment variable explicitly
         os.environ["OPENAI_API_KEY"] = api_key
         
-        # Approach 1: Try with minimal parameters (usually works best)
+        # Approach 1: Try the simplest initialization
         try:
-            embeddings = OpenAIEmbeddings()
-            print("Created embeddings using default settings")
+            from langchain_openai.embeddings import OpenAIEmbeddings as OAIEmbed
+            embeddings = OAIEmbed()
+            print("Created embeddings using langchain_openai")
         except Exception as e:
             print(f"Approach 1 failed: {e}")
+            last_error = f"Embeddings Approach 1 failed: {str(e)}"
         
-        # Approach 2: Try with explicit API key
+        # Approach 2: Try with different import
         if embeddings is None:
             try:
-                embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-                print("Created embeddings with explicit API key")
+                from langchain.embeddings.openai import OpenAIEmbeddings as OAIEmbed2
+                embeddings = OAIEmbed2()
+                print("Created embeddings using langchain.embeddings")
             except Exception as e:
                 print(f"Approach 2 failed: {e}")
+                last_error = f"Embeddings Approach 2 failed: {str(e)}"
         
-        # Approach 3: Try with model parameter
+        # Approach 3: Manual OpenAI client approach
         if embeddings is None:
             try:
-                embeddings = OpenAIEmbeddings(
-                    openai_api_key=api_key,
-                    model="text-embedding-3-small"
-                )
-                print("Created embeddings with text-embedding-3-small model")
+                print("Trying manual OpenAI client approach...")
+                import openai
+                from langchain.embeddings.base import Embeddings
+                from typing import List
+                
+                class SimpleOpenAIEmbeddings(Embeddings):
+                    def __init__(self):
+                        self.client = openai.OpenAI(api_key=api_key)
+                    
+                    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                        embeddings = []
+                        for text in texts:
+                            response = self.client.embeddings.create(
+                                model="text-embedding-3-small",
+                                input=text
+                            )
+                            embeddings.append(response.data[0].embedding)
+                        return embeddings
+                    
+                    def embed_query(self, text: str) -> List[float]:
+                        response = self.client.embeddings.create(
+                            model="text-embedding-3-small",
+                            input=text
+                        )
+                        return response.data[0].embedding
+                
+                embeddings = SimpleOpenAIEmbeddings()
+                print("Created custom embeddings wrapper")
             except Exception as e:
                 print(f"Approach 3 failed: {e}")
-        
-        # Approach 4: Try to work around proxy issues
+                last_error = f"All embedding approaches failed. Last error: {str(e)}"
+                
         if embeddings is None:
-            try:
-                import openai
-                openai.api_key = api_key
-                # Try creating embeddings without any httpx proxy config
-                embeddings = OpenAIEmbeddings(
-                    openai_api_key=api_key,
-                    model_kwargs={"timeout": 30}
-                )
-                print("Created embeddings with timeout config")
-            except Exception as e:
-                print(f"Approach 4 failed: {e}")
-                raise Exception("Could not create OpenAI embeddings with any method")
+            raise Exception(f"Could not create OpenAI embeddings: {last_error}")
         
         # Create vector store
         print("Creating vector store...")
@@ -244,7 +288,9 @@ def initialize_database():
     except Exception as e:
         print(f"Error initializing database: {e}")
         import traceback
-        print(f"Full traceback: {traceback.format_exc()}")
+        full_error = traceback.format_exc()
+        print(f"Full traceback: {full_error}")
+        last_error = f"Database init error: {str(e)}"
         return False
 
 @app.on_event("startup")
@@ -432,12 +478,18 @@ async def debug_files():
 @app.get("/debug/reinit")
 async def reinitialize_database():
     """Manually trigger database reinitialization"""
+    global last_error
+    last_error = None
     success = initialize_database()
     return {
         "reinitialized": success,
         "database_loaded": db_mangas is not None,
-        "dataframe_loaded": mangas_df is not None
+        "dataframe_loaded": mangas_df is not None,
+        "last_error": last_error
     }
+
+# Global variable to store last error
+last_error = None
 
 if __name__ == "__main__":
     import uvicorn
