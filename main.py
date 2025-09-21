@@ -434,20 +434,37 @@ async def get_manga_details(uid: int):
         }
     }
 
-@app.get("/api/stats")
-async def get_stats():
-    """Get statistics about the database"""
-    
-    if mangas_df is None:
-        return {
-            "total_manga": 0,
-            "database_loaded": False
-        }
+@app.get("/debug/status")
+async def debug_status():
+    """Debug endpoint to check initialization status"""
+    import os
     
     return {
-        "total_manga": len(mangas_df),
-        "database_loaded": True,
-        "available_tags": mangas_df["tags"].value_counts().head(10).to_dict() if "tags" in mangas_df.columns else {},
+        "database_loaded": db_mangas is not None,
+        "dataframe_loaded": mangas_df is not None,
+        "embeddings_loaded": embeddings is not None,
+        "env_vars": {
+            "OPENAI_API_KEY": "SET" if os.getenv("OPENAI_API_KEY") else "NOT SET",
+        },
+        "files": {
+            "data_dir_exists": os.path.exists("data"),
+            "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
+            "txt_exists": os.path.exists("data/tagged_description.txt"),
+        },
+        "dataframe_info": {
+            "rows": len(mangas_df) if mangas_df is not None else 0,
+            "columns": list(mangas_df.columns) if mangas_df is not None else []
+        }
+    }
+
+@app.get("/debug/reinit")
+async def reinitialize():
+    """Manually trigger reinitialization"""
+    success = initialize_database()
+    return {
+        "success": success,
+        "database_loaded": db_mangas is not None,
+        "dataframe_loaded": mangas_df is not None
     }
 
 if __name__ == "__main__":
