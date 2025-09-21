@@ -141,6 +141,8 @@ def initialize_database():
     if not api_key:
         print("ERROR: OPENAI_API_KEY not found!")
         return False
+    else:
+        print(f"OpenAI API key found: {api_key[:10]}...")
     
     # Download files if needed
     download_data_files()
@@ -156,13 +158,13 @@ def initialize_database():
         try:
             temp_df = pd.read_csv("data/mangas_with_emotions.csv")
             with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
-                for idx, row in temp_df.head(500).iterrows():  # Limit for faster init
+                # Limit to first 100 for testing
+                for idx, row in temp_df.head(100).iterrows():
                     if pd.notna(row.get("description")):
                         uid = row.get('uid', idx)
                         title = row.get('title', '')
                         desc = str(row['description']).replace('\n', ' ').strip()[:500]
                         tags = row.get('tags', '')
-                        # Include title and tags in the searchable text
                         searchable_text = f"{uid}: {title} {desc} {tags}"
                         f.write(f"{searchable_text}\n")
             print("Created tagged_description.txt")
@@ -195,72 +197,90 @@ def initialize_database():
         
         print(f"Found {len(lines)} documents")
         
-        # Create documents
+        # Create documents - LIMIT TO 50 FOR TESTING
         documents = []
-        for line in lines[:200]:  # Limit to 200 for faster initialization
+        for line in lines[:50]:  # Start with just 50 documents
             if line.strip():
-                # Extract UID from the beginning of the line
                 uid_match = re.match(r'^(\d+):', line)
                 if uid_match:
                     uid = uid_match.group(1)
-                    # Store the UID in metadata for easy retrieval
                     doc = Document(
                         page_content=line.strip(),
                         metadata={"source": "tagged_description.txt", "uid": uid}
                     )
                     documents.append(doc)
         
-        print(f"Created {len(documents)} documents")
+        print(f"Created {len(documents)} documents for embedding")
         
         if len(documents) == 0:
             print("ERROR: No documents to embed!")
             return False
         
-        # Create embeddings
-        print("Creating embeddings wrapper...")
-        embeddings = create_embeddings_wrapper(api_key)
+        # Try different embedding approaches
+        print("Attempting to create embeddings...")
         
-        # Create vector store with smaller batches
+        # First try langchain-openai
+        try:
+            from langchain_openai import OpenAIEmbeddings
+            embeddings = OpenAIEmbeddings(
+                openai_api_key=api_key,
+                model="text-embedding-3-small"
+            )
+            print("Created embeddings with langchain-openai")
+        except Exception as e:
+            print(f"langchain-openai failed: {e}")
+            
+            # Try langchain-community
+            try:
+                from langchain_community.embeddings import OpenAIEmbeddings
+                embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+                print("Created embeddings with langchain-community")
+            except Exception as e2:
+                print(f"langchain-community failed: {e2}")
+                
+                # Fallback to custom wrapper
+                try:
+                    print("Using custom embeddings wrapper...")
+                    embeddings = create_embeddings_wrapper(api_key)
+                    print("Created custom embeddings wrapper")
+                except Exception as e3:
+                    print(f"Custom wrapper failed: {e3}")
+                    return False
+        
+        # Create vector store with minimal documents
         print("Creating vector store...")
         try:
-            # Process in batches to avoid timeouts
-            batch_size = 20
-            if len(documents) <= batch_size:
-                db_mangas = Chroma.from_documents(
-                    documents,
-                    embedding=embeddings,
-                    ids=[str(i) for i in range(len(documents))]
-                )
-            else:
-                # Create with first batch
-                first_batch = documents[:batch_size]
-                db_mangas = Chroma.from_documents(
-                    first_batch,
-                    embedding=embeddings,
-                    ids=[str(i) for i in range(batch_size)]
-                )
-                
-                # Add remaining in batches
-                for i in range(batch_size, len(documents), batch_size):
-                    batch = documents[i:i+batch_size]
+            # Start with just 10 documents to test
+            test_docs = documents[:10]
+            db_mangas = Chroma.from_documents(
+                test_docs,
+                embedding=embeddings,
+                ids=[str(i) for i in range(len(test_docs))]
+            )
+            print(f"Created vector store with {len(test_docs)} documents")
+            
+            # If successful, add more documents in small batches
+            if len(documents) > 10:
+                for i in range(10, min(len(documents), 50), 10):
+                    batch = documents[i:i+10]
                     texts = [doc.page_content for doc in batch]
                     metadatas = [doc.metadata for doc in batch]
                     ids = [str(j) for j in range(i, i+len(batch))]
                     
-                    print(f"Adding batch {i//batch_size + 1}...")
-                    db_mangas.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+                    print(f"Adding batch {i//10}...")
+                    try:
+                        db_mangas.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+                    except Exception as e:
+                        print(f"Failed to add batch: {e}")
+                        break
             
             print("Vector store created successfully!")
+            
         except Exception as e:
             print(f"Error creating vector store: {e}")
-            # Try fallback with even smaller batch
-            print("Trying with smaller batch size...")
-            db_mangas = Chroma.from_documents(
-                documents[:10],
-                embedding=embeddings,
-                ids=[str(i) for i in range(10)]
-            )
-            print("Created minimal vector store")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            return False
         
         print("Database initialized successfully!")
         return True
@@ -268,7 +288,7 @@ def initialize_database():
     except Exception as e:
         print(f"Error initializing database: {e}")
         import traceback
-        print(traceback.format_exc())
+        print(f"Full traceback: {traceback.format_exc()}")
         return False
 
 def retrieve_semantic_recommendations(
