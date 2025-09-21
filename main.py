@@ -58,6 +58,7 @@ class SearchResponse(BaseModel):
 def download_data_files():
     """Download data files from GitHub Releases"""
     import urllib.request
+    import requests
     os.makedirs("data", exist_ok=True)
     
     # UPDATE THESE URLs after uploading all files to GitHub Releases
@@ -73,22 +74,38 @@ def download_data_files():
         if not os.path.exists(file_path):
             print(f"Downloading {file_path} from {url}...")
             try:
-                def download_progress(block_num, block_size, total_size):
-                    if total_size > 0:
-                        downloaded = block_num * block_size
-                        percent = min(downloaded * 100 / total_size, 100)
-                        print(f"Progress: {percent:.1f}%", end='\r')
+                # Use requests for text files to handle encoding properly
+                if file_path.endswith('.txt'):
+                    response = requests.get(url)
+                    response.raise_for_status()
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(response.text)
+                    print(f"Successfully downloaded {file_path}")
+                else:
+                    # Use urllib for CSV files
+                    def download_progress(block_num, block_size, total_size):
+                        if total_size > 0:
+                            downloaded = block_num * block_size
+                            percent = min(downloaded * 100 / total_size, 100)
+                            print(f"Progress: {percent:.1f}%", end='\r')
+                    
+                    urllib.request.urlretrieve(url, file_path, reporthook=download_progress)
+                    print(f"\nSuccessfully downloaded {file_path}")
                 
-                urllib.request.urlretrieve(url, file_path, reporthook=download_progress)
-                print(f"\nSuccessfully downloaded {file_path}")
-                
-                # Check file size to confirm download
+                # Check and report file size
                 file_size = os.path.getsize(file_path)
                 print(f"File size: {file_size / 1024 / 1024:.2f} MB")
+                
+                # For text files, also check content
+                if file_path.endswith('.txt'):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        lines = content.split('\n')
+                        print(f"Text file has {len(lines)} lines, {len(content)} characters")
+                        
             except Exception as e:
                 print(f"Failed to download {file_path}: {e}")
                 # Don't fail completely if tagged_description.txt fails
-                # We can still use text search without it
                 if "tagged_description.txt" not in file_path:
                     return False
     
