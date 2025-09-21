@@ -291,6 +291,21 @@ async def get_stats():
         "available_tags": mangas_df["tags"].value_counts().head(10).to_dict() if "tags" in mangas_df.columns else {},
     }
 
+@app.get("/debug/files")
+async def debug_files():
+    """Check what files exist in the deployment"""
+    import os
+    
+    files_info = {
+        "current_dir": os.getcwd(),
+        "directory_contents": os.listdir("."),
+        "data_dir_exists": os.path.exists("data"),
+        "data_contents": os.listdir("data") if os.path.exists("data") else None,
+        "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
+        "txt_exists": os.path.exists("data/tagged_description.txt")
+    }
+    return files_info
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
