@@ -60,24 +60,24 @@ def download_data_files():
     import urllib.request
     os.makedirs("data", exist_ok=True)
     
-    # UPDATE THESE URLs after you upload your files to GitHub Releases
+    # UPDATE THESE URLs after uploading all files to GitHub Releases
     # Go to: https://github.com/scribblepear/tankobot/releases
-    # Create a new release and upload your CSV files
-    # Then replace these URLs with the actual download links
+    # Upload: mangas_cleaned.csv, mangas_with_emotions.csv, and tagged_description.txt
     files_to_download = {
         "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
-        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv"
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/tagged_description.txt"
     }
     
     for file_path, url in files_to_download.items():
         if not os.path.exists(file_path):
             print(f"Downloading {file_path} from {url}...")
             try:
-                # Download with progress indication
                 def download_progress(block_num, block_size, total_size):
-                    downloaded = block_num * block_size
-                    percent = min(downloaded * 100 / total_size, 100)
-                    print(f"Progress: {percent:.1f}%", end='\r')
+                    if total_size > 0:
+                        downloaded = block_num * block_size
+                        percent = min(downloaded * 100 / total_size, 100)
+                        print(f"Progress: {percent:.1f}%", end='\r')
                 
                 urllib.request.urlretrieve(url, file_path, reporthook=download_progress)
                 print(f"\nSuccessfully downloaded {file_path}")
@@ -87,26 +87,15 @@ def download_data_files():
                 print(f"File size: {file_size / 1024 / 1024:.2f} MB")
             except Exception as e:
                 print(f"Failed to download {file_path}: {e}")
-                return False
+                # Don't fail completely if tagged_description.txt fails
+                # We can still use text search without it
+                if "tagged_description.txt" not in file_path:
+                    return False
     
-    # Create tagged_description.txt from the CSV if it doesn't exist
-    if not os.path.exists("data/tagged_description.txt"):
-        print("Creating tagged_description.txt from CSV...")
-        try:
-            df = pd.read_csv("data/mangas_with_emotions.csv")
-            with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
-                for idx, row in df.iterrows():
-                    if pd.notna(row.get("description")):
-                        uid = row.get('uid', idx)
-                        title = row.get('title', '')
-                        desc = str(row['description']).replace('\n', ' ').strip()[:1000]
-                        tags = row.get('tags', '')
-                        searchable_text = f"{uid}: {title} {desc} {tags}"
-                        f.write(f"{searchable_text}\n")
-            print("Created tagged_description.txt")
-        except Exception as e:
-            print(f"Could not create tagged_description.txt: {e}")
-            # Continue anyway - we can still use text search
+    # Verify critical files exist
+    if not os.path.exists("data/mangas_with_emotions.csv"):
+        print("Critical file mangas_with_emotions.csv missing!")
+        return False
     
     return True
 
@@ -114,20 +103,22 @@ def initialize_database():
     """Initialize the vector database and load manga data"""
     global db_mangas, mangas_df, embeddings
     
-    print("Initializing database...")
+    print("=" * 50)
+    print("INITIALIZING DATABASE")
+    print("=" * 50)
     
     # Try to download files if they don't exist
     if not os.path.exists("data/mangas_with_emotions.csv"):
         print("Data files not found locally, attempting to download...")
         if not download_data_files():
-            print("Failed to download data files")
+            print("Failed to download critical data files")
             return False
     
     try:
         # Load manga data
         print("Loading manga data...")
         mangas_df = pd.read_csv("data/mangas_with_emotions.csv")
-        print(f"Loaded {len(mangas_df)} manga records")
+        print(f"✓ Loaded {len(mangas_df)} manga records")
         
         # Ensure uid column exists
         if "uid" not in mangas_df.columns:
@@ -144,57 +135,87 @@ def initialize_database():
         else:
             mangas_df["large_cover"] = "/static/cover-not-found.jpg"
         
-        # Try to initialize embeddings if API key exists
+        # Try to initialize embeddings if API key and tagged_description.txt exist
         api_key = os.getenv("OPENAI_API_KEY")
-        if api_key and os.path.exists("data/tagged_description.txt"):
+        tagged_file = "data/tagged_description.txt"
+        
+        if api_key and os.path.exists(tagged_file) and os.path.getsize(tagged_file) > 0:
             try:
-                print("Attempting to create embeddings...")
-                # Load and process documents
-                raw_documents = TextLoader("data/tagged_description.txt").load()
+                print("\nAttempting to create embeddings...")
+                print(f"OpenAI API key found: {api_key[:10]}...")
                 
-                # Limit to first 100 documents for faster initialization
-                unique_texts = list({doc.page_content.strip() for doc in raw_documents})[:100]
+                # Read the tagged descriptions
+                with open(tagged_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
                 
-                documents = [
-                    Document(page_content=text, metadata={"source": "tagged_description.txt"})
-                    for text in unique_texts
-                ]
+                print(f"Loaded {len(lines)} lines from tagged_description.txt")
                 
-                # Split documents
-                text_splitter = CharacterTextSplitter(
-                    chunk_size=500,
-                    chunk_overlap=50,
-                    separator="\n"
-                )
-                documents = text_splitter.split_documents(documents)
+                # Create documents from non-empty lines
+                documents = []
+                for i, line in enumerate(lines[:500]):  # Limit to 500 for reasonable startup time
+                    line = line.strip()
+                    if line and len(line) > 10:  # Only process meaningful lines
+                        doc = Document(
+                            page_content=line,
+                            metadata={"source": "tagged_description.txt", "line": i}
+                        )
+                        documents.append(doc)
                 
-                # Assign IDs
-                for i, doc in enumerate(documents):
-                    doc.metadata["id"] = str(i)
+                print(f"Created {len(documents)} documents for embedding")
                 
-                # Create embeddings
-                embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-                
-                # Create vector store with limited documents
-                db_mangas = Chroma.from_documents(
-                    documents[:50],  # Start with just 50 for faster startup
-                    embedding=embeddings,
-                    ids=[doc.metadata["id"] for doc in documents[:50]]
-                )
-                print("Embeddings created successfully!")
+                if len(documents) > 0:
+                    # Create embeddings
+                    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+                    
+                    # Test embeddings first
+                    print("Testing embeddings...")
+                    test_embedding = embeddings.embed_query("test manga search")
+                    print(f"✓ Test embedding successful, dimension: {len(test_embedding)}")
+                    
+                    # Create vector store with documents
+                    batch_size = min(100, len(documents))  # Start with up to 100 docs
+                    print(f"Creating vector store with {batch_size} documents...")
+                    
+                    db_mangas = Chroma.from_documents(
+                        documents[:batch_size],
+                        embedding=embeddings,
+                        ids=[str(i) for i in range(batch_size)]
+                    )
+                    print(f"✓ Vector store created with {batch_size} documents!")
+                else:
+                    print("No valid documents found for embeddings")
+                    db_mangas = None
+                    
             except Exception as e:
-                print(f"Embeddings initialization failed: {e}")
+                print(f"✗ Embeddings initialization failed: {e}")
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
                 print("Falling back to text search only")
                 db_mangas = None
         else:
-            print("Skipping embeddings (no API key or tagged_description.txt)")
+            reasons = []
+            if not api_key:
+                reasons.append("no OpenAI API key")
+            if not os.path.exists(tagged_file):
+                reasons.append("tagged_description.txt not found")
+            elif os.path.getsize(tagged_file) == 0:
+                reasons.append("tagged_description.txt is empty")
+            print(f"Skipping embeddings ({', '.join(reasons)})")
+            print("Will use text-based search instead")
             db_mangas = None
         
-        print("Database initialized successfully!")
+        print("\n" + "=" * 50)
+        print("DATABASE INITIALIZATION COMPLETE")
+        print(f"✓ Manga data loaded: {len(mangas_df)} records")
+        print(f"✓ Search mode: {'Semantic (embeddings)' if db_mangas else 'Text-based'}")
+        print("=" * 50 + "\n")
+        
         return True
         
     except Exception as e:
-        print(f"Error initializing database: {e}")
+        print(f"✗ Error initializing database: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return False
 
 def retrieve_semantic_recommendations(
@@ -202,45 +223,50 @@ def retrieve_semantic_recommendations(
     initial_top_k: int = 50,
     final_top_k: int = 16
 ) -> pd.DataFrame:
-    """Retrieve manga recommendations using text search or embeddings"""
+    """Retrieve manga recommendations using embeddings or text search"""
     
     if mangas_df is None or mangas_df.empty:
         return pd.DataFrame()
     
-    # If we have embeddings, try to use them
+    # Try embeddings first if available
     if db_mangas is not None:
         try:
+            print(f"Using semantic search for: {query}")
             # Perform similarity search
             recs = db_mangas.similarity_search(query, k=initial_top_k)
-            manga_list = []
+            manga_uids = []
             
             for rec in recs:
                 content = rec.page_content.strip()
-                # Extract UID from the content
-                match = re.search(r'\d+', content)
+                # Extract UID from the content (should be at the start)
+                match = re.match(r'^(\d+):', content)
                 if match:
-                    uid_num = int(match.group())
+                    uid_num = int(match.group(1))
                     if uid_num in mangas_df["uid"].values:
-                        manga_list.append(uid_num)
+                        manga_uids.append(uid_num)
             
-            # Filter mangas by matched UIDs
-            if manga_list:
-                manga_recs = mangas_df[mangas_df["uid"].isin(manga_list)].head(final_top_k)
-                if not manga_recs.empty:
-                    return manga_recs
+            # Get manga details for found UIDs
+            if manga_uids:
+                # Preserve order of results
+                manga_recs = mangas_df[mangas_df["uid"].isin(manga_uids)]
+                # Sort by the order they appeared in search results
+                manga_recs = manga_recs.set_index('uid').loc[manga_uids].reset_index()
+                return manga_recs.head(final_top_k)
+                
         except Exception as e:
-            print(f"Embeddings search failed, falling back to text search: {e}")
+            print(f"Semantic search failed, falling back to text search: {e}")
     
     # Fallback to text search
+    print(f"Using text-based search for: {query}")
     try:
         query_lower = query.lower()
-        query_words = query_lower.split()
+        query_words = [w for w in query_lower.split() if len(w) > 2]  # Filter short words
         
-        # Score all manga (or a large sample for performance)
+        # Score manga based on text matching
         scored_results = []
         
-        # For performance, process in chunks or sample
-        sample_size = min(10000, len(mangas_df))  # Check up to 10k manga
+        # For performance, sample if dataset is large
+        sample_size = min(15000, len(mangas_df))  # Check up to 15k manga
         if len(mangas_df) > sample_size:
             sample_df = mangas_df.sample(n=sample_size, random_state=42)
         else:
@@ -252,7 +278,7 @@ def retrieve_semantic_recommendations(
             description = str(row.get('description', '')).lower()
             tags = str(row.get('tags', '')).lower()
             
-            # Exact phrase gets highest score
+            # Exact phrase match gets highest score
             if query_lower in title:
                 score += 100
             elif query_lower in description:
@@ -262,13 +288,12 @@ def retrieve_semantic_recommendations(
             
             # Individual word matches
             for word in query_words:
-                if len(word) > 2:  # Skip short words
-                    if word in title:
-                        score += 10
-                    if word in description:
-                        score += 5
-                    if word in tags:
-                        score += 3
+                if word in title:
+                    score += 10
+                if word in description:
+                    score += 5
+                if word in tags:
+                    score += 3
             
             if score > 0:
                 scored_results.append((score, idx))
@@ -291,7 +316,8 @@ async def startup_event():
     """Initialize database on startup"""
     success = initialize_database()
     if not success:
-        print("Warning: Database initialization incomplete. Some features may not work.")
+        print("WARNING: Database initialization incomplete.")
+        print("The API will still run but search functionality may be limited.")
 
 @app.get("/")
 async def root():
@@ -299,12 +325,14 @@ async def root():
     return {
         "status": "active",
         "service": "Semantic Manga Recommender API",
-        "database_loaded": db_mangas is not None or (mangas_df is not None and not mangas_df.empty)
+        "database_loaded": mangas_df is not None and not mangas_df.empty,
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "total_manga": len(mangas_df) if mangas_df is not None else 0
     }
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_manga(request: SearchRequest):
-    """Search for manga based on semantic or text matching"""
+    """Search for manga using semantic or text search"""
     
     if mangas_df is None or mangas_df.empty:
         raise HTTPException(
@@ -319,7 +347,7 @@ async def search_manga(request: SearchRequest):
         )
     
     try:
-        # Use the retrieve_semantic_recommendations function which handles both embeddings and text search
+        # Use the unified search function
         recommendations = retrieve_semantic_recommendations(
             query=request.query,
             final_top_k=request.limit or 16
@@ -405,24 +433,26 @@ async def get_stats():
     if mangas_df is None:
         return {
             "total_manga": 0,
-            "database_loaded": False
+            "database_loaded": False,
+            "search_mode": "none"
         }
     
     return {
         "total_manga": len(mangas_df),
         "database_loaded": True,
-        "available_tags": mangas_df["tags"].value_counts().head(10).to_dict() if "tags" in mangas_df.columns else {},
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "available_tags": mangas_df["tags"].value_counts().head(20).to_dict() if "tags" in mangas_df.columns else {},
     }
 
 @app.get("/debug/status")
 async def debug_status():
     """Debug endpoint to check initialization status"""
-    import os
     
     return {
         "database_loaded": db_mangas is not None,
         "dataframe_loaded": mangas_df is not None and not mangas_df.empty,
         "embeddings_loaded": embeddings is not None,
+        "search_mode": "semantic" if db_mangas is not None else "text",
         "env_vars": {
             "OPENAI_API_KEY": "SET" if os.getenv("OPENAI_API_KEY") else "NOT SET",
         },
@@ -430,11 +460,38 @@ async def debug_status():
             "data_dir_exists": os.path.exists("data"),
             "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
             "txt_exists": os.path.exists("data/tagged_description.txt"),
+            "csv_size_mb": os.path.getsize("data/mangas_with_emotions.csv") / 1024 / 1024 if os.path.exists("data/mangas_with_emotions.csv") else 0,
+            "txt_size_mb": os.path.getsize("data/tagged_description.txt") / 1024 / 1024 if os.path.exists("data/tagged_description.txt") else 0,
         },
         "dataframe_info": {
             "rows": len(mangas_df) if mangas_df is not None else 0,
             "columns": list(mangas_df.columns) if mangas_df is not None else []
         }
+    }
+
+@app.get("/debug/test-search/{query}")
+async def test_search(query: str):
+    """Test endpoint to debug search functionality"""
+    
+    if mangas_df is None:
+        return {"error": "Database not loaded"}
+    
+    results = retrieve_semantic_recommendations(query, final_top_k=5)
+    
+    if results.empty:
+        return {"query": query, "results": "No results found"}
+    
+    return {
+        "query": query,
+        "search_mode": "semantic" if db_mangas is not None else "text",
+        "results": [
+            {
+                "title": row.get("title"),
+                "uid": row.get("uid"),
+                "description": str(row.get("description", ""))[:200]
+            }
+            for _, row in results.iterrows()
+        ]
     }
 
 if __name__ == "__main__":
