@@ -230,59 +230,66 @@ def initialize_database():
         # Set environment variable explicitly
         os.environ["OPENAI_API_KEY"] = api_key
         
-        # Approach 1: Try the simplest initialization
+        # Approach 1: Direct OpenAI client with simple wrapper
         try:
-            from langchain_openai.embeddings import OpenAIEmbeddings as OAIEmbed
-            embeddings = OAIEmbed()
-            print("Created embeddings using langchain_openai")
+            print("Creating simple OpenAI embeddings wrapper...")
+            from typing import List
+            
+            class SimpleEmbeddings:
+                def __init__(self, api_key):
+                    # Use requests instead of openai client to avoid Pydantic issues
+                    self.api_key = api_key
+                    self.headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
+                
+                def _get_embedding(self, text: str) -> List[float]:
+                    import json
+                    import urllib.request
+                    import urllib.parse
+                    
+                    url = "https://api.openai.com/v1/embeddings"
+                    data = {
+                        "model": "text-embedding-3-small",
+                        "input": text
+                    }
+                    
+                    req = urllib.request.Request(
+                        url,
+                        data=json.dumps(data).encode('utf-8'),
+                        headers=self.headers
+                    )
+                    
+                    with urllib.request.urlopen(req) as response:
+                        result = json.loads(response.read().decode('utf-8'))
+                        return result['data'][0]['embedding']
+                
+                def embed_documents(self, texts: List[str]) -> List[List[float]]:
+                    return [self._get_embedding(text) for text in texts]
+                
+                def embed_query(self, text: str) -> List[float]:
+                    return self._get_embedding(text)
+            
+            embeddings = SimpleEmbeddings(api_key)
+            print("Created simple embeddings wrapper successfully")
+            
         except Exception as e:
-            print(f"Approach 1 failed: {e}")
-            last_error = f"Embeddings Approach 1 failed: {str(e)}"
-        
-        # Approach 2: Try with different import
+            print(f"Simple wrapper failed: {e}")
+            last_error = f"Could not create embeddings: {str(e)}"
+            
         if embeddings is None:
+            # Approach 2: Try using text-embedding-ada-002 which is more compatible
             try:
-                from langchain.embeddings.openai import OpenAIEmbeddings as OAIEmbed2
-                embeddings = OAIEmbed2()
-                print("Created embeddings using langchain.embeddings")
+                from langchain.embeddings import OpenAIEmbeddings
+                embeddings = OpenAIEmbeddings(
+                    model="text-embedding-ada-002",
+                    openai_api_key=api_key
+                )
+                print("Created embeddings with ada-002 model")
             except Exception as e:
-                print(f"Approach 2 failed: {e}")
-                last_error = f"Embeddings Approach 2 failed: {str(e)}"
-        
-        # Approach 3: Manual OpenAI client approach
-        if embeddings is None:
-            try:
-                print("Trying manual OpenAI client approach...")
-                import openai
-                from langchain.embeddings.base import Embeddings
-                from typing import List
-                
-                class SimpleOpenAIEmbeddings(Embeddings):
-                    def __init__(self):
-                        self.client = openai.OpenAI(api_key=api_key)
-                    
-                    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-                        embeddings = []
-                        for text in texts:
-                            response = self.client.embeddings.create(
-                                model="text-embedding-3-small",
-                                input=text
-                            )
-                            embeddings.append(response.data[0].embedding)
-                        return embeddings
-                    
-                    def embed_query(self, text: str) -> List[float]:
-                        response = self.client.embeddings.create(
-                            model="text-embedding-3-small",
-                            input=text
-                        )
-                        return response.data[0].embedding
-                
-                embeddings = SimpleOpenAIEmbeddings()
-                print("Created custom embeddings wrapper")
-            except Exception as e:
-                print(f"Approach 3 failed: {e}")
-                last_error = f"All embedding approaches failed. Last error: {str(e)}"
+                print(f"Ada-002 approach failed: {e}")
+                last_error = f"All embedding approaches failed: {str(e)}"
                 
         if embeddings is None:
             raise Exception(f"Could not create OpenAI embeddings: {last_error}")
