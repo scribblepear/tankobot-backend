@@ -65,9 +65,9 @@ def download_data_files():
     # Go to: https://github.com/scribblepear/tankobot/releases
     # Upload: mangas_cleaned.csv, mangas_with_emotions.csv, and tagged_description.txt
     files_to_download = {
-        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
-        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
-        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/tagged_description.txt"
+        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_cleaned.csv",
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot/releases/download/v1.0/tagged_description.txt"
     }
     
     for file_path, url in files_to_download.items():
@@ -161,56 +161,54 @@ def initialize_database():
                 print("\nAttempting to create embeddings...")
                 print(f"OpenAI API key found: {api_key[:10]}...")
                 
-                # Read the entire file
-                with open(tagged_file, "r", encoding="utf-8") as f:
+                # Read the entire file with explicit encoding
+                with open(tagged_file, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
                 
-                # Debug: check what we're reading
-                print(f"File size: {len(content)} characters")
-                print(f"First 200 chars: {content[:200]}")
+                # Debug: Check what's actually in the file
+                print(f"File size on disk: {os.path.getsize(tagged_file)} bytes")
+                print(f"Content length: {len(content)} characters")
+                print(f"First 500 chars: {repr(content[:500])}")
                 
-                # Try different parsing strategies
-                documents = []
-                import re
-                
-                # Strategy 1: Split by line breaks if they exist
-                lines = content.split('\n')
-                if len(lines) > 1:
-                    print(f"Found {len(lines)} lines")
-                    for line in lines[:500]:  # Limit to 500
-                        line = line.strip()
-                        if line and len(line) > 20:
-                            # Extract UID if line starts with number
-                            match = re.match(r'^(\d+)\s+(.+)', line)
-                            if match:
-                                uid = match.group(1)
-                                text = match.group(2)
-                                doc_content = f"{uid}: {text[:800]}"
-                            else:
-                                doc_content = line[:800]
-                                uid = str(len(documents))
-                            
-                            doc = Document(
-                                page_content=doc_content,
-                                metadata={"source": "tagged_description.txt", "uid": uid}
-                            )
-                            documents.append(doc)
-                else:
-                    # Strategy 2: Try to split by number pattern
-                    print("Single line detected, trying pattern split...")
-                    # Match pattern like "1 text 2 text 3 text"
-                    pattern = r'(\d+)\s+([^0-9]+?)(?=\d+\s+|$)'
-                    matches = re.findall(pattern, content)
-                    print(f"Found {len(matches)} matches")
+                # If file seems empty, try reading in binary mode
+                if len(content) <= 1:
+                    print("File appears empty, checking binary content...")
+                    with open(tagged_file, "rb") as f:
+                        binary_content = f.read()
+                        print(f"Binary size: {len(binary_content)} bytes")
+                        print(f"First 100 bytes: {binary_content[:100]}")
                     
-                    for uid, text in matches[:500]:  # Limit to 500
-                        if len(text.strip()) > 20:
-                            doc_content = f"{uid}: {text.strip()[:800]}"
-                            doc = Document(
-                                page_content=doc_content,
-                                metadata={"source": "tagged_description.txt", "uid": uid}
-                            )
-                            documents.append(doc)
+                    # File is corrupted or not downloading properly
+                    print("Tagged description file is not valid, skipping embeddings")
+                    db_mangas = None
+                    return  # Exit early
+                
+                # Parse the content into documents
+                documents = []
+                
+                # Try splitting by newlines
+                lines = content.split('\n')
+                print(f"Split into {len(lines)} lines")
+                
+                for i, line in enumerate(lines[:500]):  # Process up to 500 lines
+                    line = line.strip()
+                    if line and len(line) > 20:
+                        # Check if line starts with UID
+                        import re
+                        match = re.match(r'^(\d+)[:\s]+(.+)', line)
+                        if match:
+                            uid = match.group(1)
+                            text = match.group(2)[:800]
+                            doc_content = f"{uid}: {text}"
+                        else:
+                            doc_content = line[:800]
+                            uid = str(i)
+                        
+                        doc = Document(
+                            page_content=doc_content,
+                            metadata={"source": "tagged_description.txt", "uid": uid}
+                        )
+                        documents.append(doc)
                 
                 print(f"Created {len(documents)} documents for embedding")
                 
