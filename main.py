@@ -64,9 +64,9 @@ def download_data_files():
     # Go to: https://github.com/scribblepear/tankobot/releases
     # Upload: mangas_cleaned.csv, mangas_with_emotions.csv, and tagged_description.txt
     files_to_download = {
-        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
-        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
-        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/tagged_description.txt"
+        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_cleaned.csv",
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot/releases/download/v1.0/tagged_description.txt"
     }
     
     for file_path, url in files_to_download.items():
@@ -144,23 +144,33 @@ def initialize_database():
                 print("\nAttempting to create embeddings...")
                 print(f"OpenAI API key found: {api_key[:10]}...")
                 
-                # Read the tagged descriptions
+                # Read the entire file
                 with open(tagged_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                    content = f.read()
                 
-                print(f"Loaded {len(lines)} lines from tagged_description.txt")
+                # Split by pattern like "1 ", "2 ", etc. at start of lines or in continuous text
+                import re
+                # This pattern matches numbers at the beginning of entries
+                entries = re.split(r'\n?(\d+)\s+', content)
                 
-                # Create documents from non-empty lines
+                # Create documents from the split entries
                 documents = []
-                for i, line in enumerate(lines[:500]):  # Limit to 500 for reasonable startup time
-                    line = line.strip()
-                    if line and len(line) > 10:  # Only process meaningful lines
-                        doc = Document(
-                            page_content=line,
-                            metadata={"source": "tagged_description.txt", "line": i}
-                        )
-                        documents.append(doc)
+                # Start from 1, skip by 2 (pattern creates: ['', '1', 'text1', '2', 'text2', ...])
+                for i in range(1, min(len(entries), 1000), 2):  # Limit to 500 entries
+                    if i+1 < len(entries):
+                        uid = entries[i]
+                        text = entries[i+1].strip()
+                        
+                        if len(text) > 20:  # Only process meaningful content
+                            # Format: "uid: text content"
+                            doc_content = f"{uid}: {text[:800]}"  # Limit text length
+                            doc = Document(
+                                page_content=doc_content,
+                                metadata={"source": "tagged_description.txt", "uid": uid}
+                            )
+                            documents.append(doc)
                 
+                print(f"Parsed {len(entries)//2} entries from tagged_description.txt")
                 print(f"Created {len(documents)} documents for embedding")
                 
                 if len(documents) > 0:
