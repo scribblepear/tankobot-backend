@@ -64,9 +64,9 @@ def download_data_files():
     # Go to: https://github.com/scribblepear/tankobot/releases
     # Upload: mangas_cleaned.csv, mangas_with_emotions.csv, and tagged_description.txt
     files_to_download = {
-        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
-        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
-        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/tagged_description.txt"
+        "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_cleaned.csv",
+        "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot/releases/download/v1.0/mangas_with_emotions.csv",
+        "data/tagged_description.txt": "https://github.com/scribblepear/tankobot/releases/download/v1.0/tagged_description.txt"
     }
     
     for file_path, url in files_to_download.items():
@@ -148,29 +148,53 @@ def initialize_database():
                 with open(tagged_file, "r", encoding="utf-8") as f:
                     content = f.read()
                 
-                # Split by pattern like "1 ", "2 ", etc. at start of lines or in continuous text
-                import re
-                # This pattern matches numbers at the beginning of entries
-                entries = re.split(r'\n?(\d+)\s+', content)
+                # Debug: check what we're reading
+                print(f"File size: {len(content)} characters")
+                print(f"First 200 chars: {content[:200]}")
                 
-                # Create documents from the split entries
+                # Try different parsing strategies
                 documents = []
-                # Start from 1, skip by 2 (pattern creates: ['', '1', 'text1', '2', 'text2', ...])
-                for i in range(1, min(len(entries), 1000), 2):  # Limit to 500 entries
-                    if i+1 < len(entries):
-                        uid = entries[i]
-                        text = entries[i+1].strip()
-                        
-                        if len(text) > 20:  # Only process meaningful content
-                            # Format: "uid: text content"
-                            doc_content = f"{uid}: {text[:800]}"  # Limit text length
+                import re
+                
+                # Strategy 1: Split by line breaks if they exist
+                lines = content.split('\n')
+                if len(lines) > 1:
+                    print(f"Found {len(lines)} lines")
+                    for line in lines[:500]:  # Limit to 500
+                        line = line.strip()
+                        if line and len(line) > 20:
+                            # Extract UID if line starts with number
+                            match = re.match(r'^(\d+)\s+(.+)', line)
+                            if match:
+                                uid = match.group(1)
+                                text = match.group(2)
+                                doc_content = f"{uid}: {text[:800]}"
+                            else:
+                                doc_content = line[:800]
+                                uid = str(len(documents))
+                            
+                            doc = Document(
+                                page_content=doc_content,
+                                metadata={"source": "tagged_description.txt", "uid": uid}
+                            )
+                            documents.append(doc)
+                else:
+                    # Strategy 2: Try to split by number pattern
+                    print("Single line detected, trying pattern split...")
+                    # Match pattern like "1 text 2 text 3 text"
+                    pattern = r'(\d+)\s+([^0-9]+?)(?=\d+\s+|$)'
+                    matches = re.findall(pattern, content)
+                    print(f"Found {len(matches)} matches")
+                    
+                    for uid, text in matches[:500]:  # Limit to 500
+                        if len(text.strip()) > 20:
+                            doc_content = f"{uid}: {text.strip()[:800]}"
                             doc = Document(
                                 page_content=doc_content,
                                 metadata={"source": "tagged_description.txt", "uid": uid}
                             )
                             documents.append(doc)
                 
-                print(f"Parsed {len(entries)//2} entries from tagged_description.txt")
                 print(f"Created {len(documents)} documents for embedding")
                 
                 if len(documents) > 0:
