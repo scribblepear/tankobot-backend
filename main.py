@@ -201,15 +201,16 @@ def initialize_database():
             last_error = "No content in tagged_description.txt"
             return False
         
-        # Create documents from lines
+        # Create documents from lines - START WITH LESS FOR TESTING
         documents = []
-        for line in lines[:1000]:  # Limit to 1000 for performance
+        max_docs = min(100, len(lines))  # Start with only 100 documents
+        for line in lines[:max_docs]:
             if line.strip():
                 documents.append(
                     Document(page_content=line.strip(), metadata={"source": "tagged_description.txt"})
                 )
         
-        print(f"Created {len(documents)} documents")
+        print(f"Created {len(documents)} documents (limited for initial testing)")
         
         # Ensure we have documents to embed
         if len(documents) == 0:
@@ -268,15 +269,40 @@ def initialize_database():
                             with urllib.request.urlopen(req, timeout=30) as response:
                                 result = json.loads(response.read().decode('utf-8'))
                                 return result['data'][0]['embedding']
+                        except urllib.error.HTTPError as e:
+                            if e.code == 503:  # Service Unavailable
+                                if retry < max_retries - 1:
+                                    wait_time = (retry + 1) * 2  # Exponential backoff
+                                    print(f"OpenAI API 503 error, waiting {wait_time}s before retry...")
+                                    time.sleep(wait_time)
+                                else:
+                                    print(f"OpenAI API 503 error after {max_retries} retries")
+                                    raise
+                            elif e.code == 429:  # Rate limit
+                                if retry < max_retries - 1:
+                                    wait_time = (retry + 1) * 5  # Longer wait for rate limits
+                                    print(f"Rate limit hit, waiting {wait_time}s...")
+                                    time.sleep(wait_time)
+                                else:
+                                    raise
+                            else:
+                                raise
                         except Exception as e:
                             if retry < max_retries - 1:
                                 print(f"Embedding retry {retry + 1}/{max_retries}: {e}")
-                                time.sleep(1)  # Brief pause before retry
+                                time.sleep(2)
                             else:
                                 raise
                 
                 def embed_documents(self, texts: List[str]) -> List[List[float]]:
-                    return [self._get_embedding(text) for text in texts]
+                    import time
+                    embeddings = []
+                    for i, text in enumerate(texts):
+                        if i > 0 and i % 10 == 0:
+                            print(f"Embedding document {i}/{len(texts)}...")
+                            time.sleep(0.5)  # Rate limiting between batches
+                        embeddings.append(self._get_embedding(text))
+                    return embeddings
                 
                 def embed_query(self, text: str) -> List[float]:
                     return self._get_embedding(text)
@@ -314,8 +340,8 @@ def initialize_database():
             # Create the vector store with batching for large document sets
             print(f"Creating Chroma database with {len(documents)} documents...")
             
-            # Process in smaller batches to avoid timeout
-            batch_size = 100
+            # Process in smaller batches to avoid timeout and rate limits
+            batch_size = 20  # Smaller batch size to avoid rate limits
             all_ids = [doc.metadata["id"] for doc in documents]
             
             if len(documents) > batch_size:
@@ -324,6 +350,7 @@ def initialize_database():
                 first_batch_docs = documents[:batch_size]
                 first_batch_ids = all_ids[:batch_size]
                 
+                print("Creating initial vector store...")
                 db_mangas = Chroma.from_documents(
                     first_batch_docs,
                     embedding=embeddings,
@@ -335,18 +362,26 @@ def initialize_database():
                 for i in range(batch_size, len(documents), batch_size):
                     batch_docs = documents[i:i+batch_size]
                     batch_ids = all_ids[i:i+batch_size]
-                    print(f"Adding batch {i//batch_size + 1}/{len(documents)//batch_size + 1}...")
+                    batch_num = (i//batch_size) + 1
+                    total_batches = (len(documents) + batch_size - 1) // batch_size
+                    print(f"Adding batch {batch_num}/{total_batches}...")
                     
                     # Extract texts and metadatas
                     texts = [doc.page_content for doc in batch_docs]
                     metadatas = [doc.metadata for doc in batch_docs]
                     
-                    db_mangas.add_texts(
-                        texts=texts,
-                        metadatas=metadatas,
-                        ids=batch_ids
-                    )
-                print("All batches added successfully!")
+                    try:
+                        db_mangas.add_texts(
+                            texts=texts,
+                            metadatas=metadatas,
+                            ids=batch_ids
+                        )
+                        print(f"Batch {batch_num} added successfully")
+                    except Exception as e:
+                        print(f"Error in batch {batch_num}: {e}")
+                        # Continue with other batches even if one fails
+                        
+                print("All batches processed!")
             else:
                 # Small dataset, process all at once
                 db_mangas = Chroma.from_documents(
