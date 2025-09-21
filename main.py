@@ -126,15 +126,44 @@ def initialize_database():
         try:
             print("Creating tagged_description.txt from CSV data...")
             temp_df = pd.read_csv("data/mangas_with_emotions.csv")
+            created_count = 0
             with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
                 for idx, row in temp_df.iterrows():
                     if pd.notna(row.get("description")) and pd.notna(row.get("uid")):
-                        f.write(f"{int(row['uid'])}: {row['description'][:500]}\n")
-            print("Successfully created tagged_description.txt")
+                        # Write each manga description on its own line
+                        desc = str(row['description']).replace('\n', ' ').strip()[:500]
+                        if desc:  # Only write non-empty descriptions
+                            f.write(f"{int(row['uid'])}: {desc}\n")
+                            created_count += 1
+                    if created_count >= 1000:  # Limit to first 1000 for faster testing
+                        break
+            print(f"Successfully created tagged_description.txt with {created_count} entries")
         except Exception as e:
             print(f"Could not create tagged_description.txt: {e}")
             last_error = f"Could not create tagged_description.txt: {e}"
             return False
+    
+    # Verify the file has content
+    try:
+        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+            content = f.read()
+            if not content.strip():
+                print("ERROR: tagged_description.txt is empty!")
+                # Try to recreate it
+                print("Attempting to recreate tagged_description.txt...")
+                temp_df = pd.read_csv("data/mangas_with_emotions.csv")
+                created_count = 0
+                with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
+                    for idx, row in temp_df.head(1000).iterrows():  # Use first 1000 rows
+                        if 'description' in row and pd.notna(row['description']):
+                            uid = row.get('uid', idx)
+                            desc = str(row['description']).replace('\n', ' ').strip()[:500]
+                            if desc:
+                                f.write(f"{uid}: {desc}\n")
+                                created_count += 1
+                print(f"Recreated with {created_count} entries")
+    except Exception as e:
+        print(f"Error checking tagged_description.txt: {e}")
     
     try:
         # Load manga data
@@ -159,55 +188,40 @@ def initialize_database():
         
         # Load and process documents
         print("Loading text documents...")
-        raw_documents = TextLoader("data/tagged_description.txt").load()
-        print(f"Loaded {len(raw_documents)} documents")
         
-        # Check if we need to split the single document differently
-        if len(raw_documents) == 1:
-            # Split by newlines to get individual manga descriptions
-            text_content = raw_documents[0].page_content
-            lines = text_content.strip().split('\n')
-            documents = [
-                Document(page_content=line.strip(), metadata={"source": "tagged_description.txt"})
-                for line in lines if line.strip()
-            ]
-            print(f"Split into {len(documents)} individual manga descriptions")
-        else:
-            # Remove duplicates
-            unique_texts = list({doc.page_content.strip() for doc in raw_documents})
-            documents = [
-                Document(page_content=text, metadata={"source": "tagged_description.txt"})
-                for text in unique_texts
-            ]
-            print(f"Unique documents: {len(documents)}")
+        # Read the file directly to debug
+        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+            file_content = f.read()
+            print(f"File size: {len(file_content)} characters")
+            lines = [line.strip() for line in file_content.split('\n') if line.strip()]
+            print(f"Found {len(lines)} non-empty lines in file")
         
-        # Only split if documents are too long
-        final_documents = []
-        text_splitter = CharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-            separator="\n"
-        )
+        if len(lines) == 0:
+            print("ERROR: No content in tagged_description.txt!")
+            last_error = "No content in tagged_description.txt"
+            return False
         
-        for doc in documents:
-            if len(doc.page_content) > 500:
-                split_docs = text_splitter.split_documents([doc])
-                final_documents.extend(split_docs)
-            else:
-                final_documents.append(doc)
+        # Create documents from lines
+        documents = []
+        for line in lines[:1000]:  # Limit to 1000 for performance
+            if line.strip():
+                documents.append(
+                    Document(page_content=line.strip(), metadata={"source": "tagged_description.txt"})
+                )
         
-        documents = final_documents
-        print(f"Final document count: {len(documents)}")
+        print(f"Created {len(documents)} documents")
         
         # Ensure we have documents to embed
         if len(documents) == 0:
             print("ERROR: No documents to embed!")
-            last_error = "No documents to embed after splitting"
+            last_error = "No documents to embed after processing"
             return False
         
         # Assign IDs
         for i, doc in enumerate(documents):
             doc.metadata["id"] = str(i)
+        
+        print(f"Ready to embed {len(documents)} documents")
         
         # Create embeddings with multiple fallback approaches
         print("Creating embeddings...")
@@ -475,18 +489,41 @@ async def debug_files():
     }
     return files_info
 
-@app.get("/debug/reinit")
-async def reinitialize_database():
-    """Manually trigger database reinitialization"""
-    global last_error
-    last_error = None
-    success = initialize_database()
-    return {
-        "reinitialized": success,
-        "database_loaded": db_mangas is not None,
-        "dataframe_loaded": mangas_df is not None,
-        "last_error": last_error
+@app.get("/debug/check-data")
+async def check_data():
+    """Check the data files and their contents"""
+    result = {
+        "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
+        "txt_exists": os.path.exists("data/tagged_description.txt")
     }
+    
+    if result["csv_exists"]:
+        try:
+            df = pd.read_csv("data/mangas_with_emotions.csv")
+            result["csv_rows"] = len(df)
+            result["csv_columns"] = list(df.columns)
+            result["has_description_column"] = "description" in df.columns
+            result["has_uid_column"] = "uid" in df.columns
+            
+            if "description" in df.columns:
+                result["descriptions_with_content"] = df["description"].notna().sum()
+                result["sample_description"] = str(df[df["description"].notna()]["description"].iloc[0])[:200] if result["descriptions_with_content"] > 0 else None
+        except Exception as e:
+            result["csv_error"] = str(e)
+    
+    if result["txt_exists"]:
+        try:
+            with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+                content = f.read()
+                lines = content.strip().split('\n')
+                result["txt_size"] = len(content)
+                result["txt_lines"] = len(lines)
+                result["txt_non_empty_lines"] = len([l for l in lines if l.strip()])
+                result["txt_sample"] = lines[0][:200] if lines and lines[0] else None
+        except Exception as e:
+            result["txt_error"] = str(e)
+    
+    return result
 
 # Global variable to store last error
 last_error = None
