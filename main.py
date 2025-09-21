@@ -23,13 +23,20 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Semantic Manga Recommender API")
 
-# Configure CORS
+# Configure CORS - Updated for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend URL
+    allow_origins=[
+        "https://scribblepear.github.io",  # Your GitHub Pages domain
+        "http://localhost:3000",  # Local development
+        "http://localhost:8000",  # Local development
+        "http://127.0.0.1:3000",  # Local development
+        "http://127.0.0.1:8000",  # Local development
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly list methods
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Global variables for storing loaded data
@@ -175,7 +182,16 @@ async def root():
     return {
         "status": "active",
         "service": "Semantic Manga Recommender API",
-        "database_loaded": db_mangas is not None
+        "database_loaded": db_mangas is not None,
+        "message": "API is running successfully"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Additional health check endpoint"""
+    return {
+        "status": "healthy",
+        "database_ready": db_mangas is not None and mangas_df is not None
     }
 
 @app.post("/api/search", response_model=SearchResponse)
@@ -285,6 +301,13 @@ async def get_stats():
         "available_tags": mangas_df["tags"].value_counts().head(10).to_dict() if "tags" in mangas_df.columns else {},
     }
 
+# Add OPTIONS handler for CORS preflight
+@app.options("/{path:path}")
+async def options_handler():
+    return {"message": "OK"}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Railway will set PORT environment variable
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
