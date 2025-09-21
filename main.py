@@ -180,11 +180,9 @@ async def root():
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_manga(request: SearchRequest):
-    """
-    Search for manga based on semantic similarity to the query
-    """
+    """Search for manga based on simple text matching"""
     
-    if db_mangas is None or mangas_df is None:
+    if mangas_df is None:
         raise HTTPException(
             status_code=503,
             detail="Database not initialized. Please try again later."
@@ -197,18 +195,47 @@ async def search_manga(request: SearchRequest):
         )
     
     try:
-        # Get recommendations
-        recommendations = retrieve_semantic_recommendations(
-            query=request.query,
-            final_top_k=request.limit
-        )
+        query_lower = request.query.lower()
+        query_words = query_lower.split()
         
-        if recommendations.empty:
-            return SearchResponse(results=[], count=0)
+        # Score each manga
+        scored_results = []
+        
+        # Sample for performance - check 5000 random manga
+        sample_size = min(5000, len(mangas_df))
+        sample_df = mangas_df.sample(n=sample_size)
+        
+        for _, row in sample_df.iterrows():
+            score = 0
+            title = str(row.get('title', '')).lower()
+            description = str(row.get('description', '')).lower()
+            tags = str(row.get('tags', '')).lower()
+            
+            # Exact phrase match gets highest score
+            if query_lower in title:
+                score += 10
+            if query_lower in description:
+                score += 5
+            if query_lower in tags:
+                score += 3
+            
+            # Individual word matches
+            for word in query_words:
+                if len(word) > 2:  # Skip very short words
+                    if word in title: score += 2
+                    if word in description: score += 1
+                    if word in tags: score += 1
+            
+            if score > 0:
+                scored_results.append((score, row))
+        
+        # Sort by score and get top results
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        top_results = scored_results[:request.limit or 16]
         
         # Convert to response format
         results = []
-        for _, row in recommendations.iterrows():
+        for score, row in top_results:
             manga = MangaResponse(
                 uid=int(row.get("uid", 0)),
                 title=str(row.get("title", "Unknown Title")),
@@ -216,7 +243,7 @@ async def search_manga(request: SearchRequest):
                 cover=str(row.get("large_cover", "/static/cover-not-found.jpg")),
                 rating=float(row.get("rating")) if pd.notna(row.get("rating")) else None,
                 year=int(row.get("year")) if pd.notna(row.get("year")) else None,
-                tags=str(row.get("tags", ""))
+                tags=str(row.get("tags", "")) if pd.notna(row.get("tags")) else ""
             )
             results.append(manga)
         
@@ -229,9 +256,8 @@ async def search_manga(request: SearchRequest):
         print(f"Search error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred during search: {str(e)}"
+            detail="An error occurred during search"
         )
-
 @app.get("/api/manga/{uid}")
 async def get_manga_details(uid: int):
     """Get detailed information about a specific manga"""
