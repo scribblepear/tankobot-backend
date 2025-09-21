@@ -10,11 +10,16 @@ import urllib.request
 from pathlib import Path
 
 from langchain_community.document_loaders import TextLoader
-from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain.docstore.document import Document
 from dotenv import load_dotenv
+
+# Try different import methods for embeddings
+try:
+    from langchain_openai import OpenAIEmbeddings
+except ImportError:
+    from langchain.embeddings import OpenAIEmbeddings
 
 # Load environment variables
 load_dotenv()
@@ -94,6 +99,14 @@ def initialize_database():
     
     print("Initializing database...")
     
+    # Check OpenAI API key
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("ERROR: OPENAI_API_KEY not found in environment variables!")
+        return False
+    else:
+        print(f"OpenAI API key found: {api_key[:8]}...")
+    
     # Check if required files exist
     if not os.path.exists("data/mangas_with_emotions.csv"):
         print("Warning: mangas_with_emotions.csv not found. Using fallback data.")
@@ -101,11 +114,24 @@ def initialize_database():
     
     if not os.path.exists("data/tagged_description.txt"):
         print("Warning: tagged_description.txt not found.")
-        return False
+        # Try to create a simple tagged_description.txt if it doesn't exist
+        try:
+            print("Creating tagged_description.txt from CSV data...")
+            temp_df = pd.read_csv("data/mangas_with_emotions.csv")
+            with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
+                for idx, row in temp_df.iterrows():
+                    if pd.notna(row.get("description")) and pd.notna(row.get("uid")):
+                        f.write(f"{int(row['uid'])}: {row['description'][:500]}\n")
+            print("Successfully created tagged_description.txt")
+        except Exception as e:
+            print(f"Could not create tagged_description.txt: {e}")
+            return False
     
     try:
         # Load manga data
+        print("Loading manga CSV...")
         mangas_df = pd.read_csv("data/mangas_with_emotions.csv")
+        print(f"Loaded {len(mangas_df)} manga records")
         
         # Ensure uid column exists
         if "uid" not in mangas_df.columns:
@@ -123,7 +149,9 @@ def initialize_database():
             mangas_df["large_cover"] = "/static/cover-not-found.jpg"
         
         # Load and process documents
+        print("Loading text documents...")
         raw_documents = TextLoader("data/tagged_description.txt").load()
+        print(f"Loaded {len(raw_documents)} documents")
         
         # Remove duplicates
         unique_texts = list({doc.page_content.strip() for doc in raw_documents})
@@ -132,6 +160,7 @@ def initialize_database():
             Document(page_content=text, metadata={"source": "tagged_description.txt"})
             for text in unique_texts
         ]
+        print(f"Unique documents: {len(documents)}")
         
         # Split documents
         text_splitter = CharacterTextSplitter(
@@ -140,26 +169,49 @@ def initialize_database():
             separator="\n"
         )
         documents = text_splitter.split_documents(documents)
+        print(f"Split into {len(documents)} chunks")
         
         # Assign IDs
         for i, doc in enumerate(documents):
             doc.metadata["id"] = str(i)
         
-        # Create embeddings
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        # Create embeddings with error handling
+        print("Creating embeddings...")
+        try:
+            # Try with model parameter first
+            embeddings = OpenAIEmbeddings(
+                model="text-embedding-3-small",
+                openai_api_key=api_key
+            )
+            print("Created embeddings with text-embedding-3-small model")
+        except TypeError as e:
+            # If model parameter causes issues, try without it
+            print(f"Note: Using default embedding model due to: {e}")
+            embeddings = OpenAIEmbeddings(
+                openai_api_key=api_key
+            )
+        except Exception as e:
+            print(f"Error creating embeddings: {e}")
+            print("Trying minimal parameters...")
+            # Try one more time with minimal parameters
+            embeddings = OpenAIEmbeddings()
         
         # Create vector store
+        print("Creating vector store...")
         db_mangas = Chroma.from_documents(
             documents,
             embedding=embeddings,
             ids=[doc.metadata["id"] for doc in documents]
         )
+        print("Vector store created successfully!")
         
         print("Database initialized successfully!")
         return True
         
     except Exception as e:
         print(f"Error initializing database: {e}")
+        import traceback
+        print(f"Full traceback: {traceback.format_exc()}")
         return False
 
 @app.on_event("startup")
@@ -336,9 +388,23 @@ async def debug_files():
         "data_dir_exists": os.path.exists("data"),
         "data_contents": os.listdir("data") if os.path.exists("data") else None,
         "csv_exists": os.path.exists("data/mangas_with_emotions.csv"),
-        "txt_exists": os.path.exists("data/tagged_description.txt")
+        "txt_exists": os.path.exists("data/tagged_description.txt"),
+        "env_vars": {
+            "OPENAI_API_KEY": "SET" if os.getenv("OPENAI_API_KEY") else "NOT SET",
+            "PORT": os.getenv("PORT", "not set")
+        }
     }
     return files_info
+
+@app.get("/debug/reinit")
+async def reinitialize_database():
+    """Manually trigger database reinitialization"""
+    success = initialize_database()
+    return {
+        "reinitialized": success,
+        "database_loaded": db_mangas is not None,
+        "dataframe_loaded": mangas_df is not None
+    }
 
 if __name__ == "__main__":
     import uvicorn
