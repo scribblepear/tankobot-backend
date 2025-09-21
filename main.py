@@ -63,9 +63,12 @@ def download_data_files():
     }
     
     for file_path, url in files_to_download.items():
-        if not os.path.exists(file_path):
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
             print(f"Downloading {file_path}...")
             try:
+                # Delete empty file if exists
+                if os.path.exists(file_path):
+                    os.remove(file_path)
                 urllib.request.urlretrieve(url, file_path)
                 print(f"Successfully downloaded {file_path}")
             except Exception as e:
@@ -74,134 +77,18 @@ def download_data_files():
     
     return True
 
-def create_embeddings_wrapper(api_key):
-    """Create a simple embeddings wrapper that works with urllib"""
-    from typing import List
-    
-    class SimpleEmbeddings:
-        def __init__(self, api_key):
-            self.api_key = api_key
-            self.headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-        
-        def _get_embedding(self, text: str) -> List[float]:
-            import json
-            import time
-            
-            url = "https://api.openai.com/v1/embeddings"
-            data = {
-                "model": "text-embedding-3-small",
-                "input": text[:8000]  # Limit text length
-            }
-            
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(data).encode('utf-8'),
-                headers=self.headers
-            )
-            
-            max_retries = 3
-            for retry in range(max_retries):
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as response:
-                        result = json.loads(response.read().decode('utf-8'))
-                        return result['data'][0]['embedding']
-                except urllib.error.HTTPError as e:
-                    if e.code in [503, 429] and retry < max_retries - 1:
-                        wait_time = (retry + 1) * 2
-                        print(f"API error {e.code}, waiting {wait_time}s...")
-                        time.sleep(wait_time)
-                    else:
-                        raise
-        
-        def embed_documents(self, texts: List[str]) -> List[List[float]]:
-            import time
-            embeddings = []
-            for i, text in enumerate(texts):
-                if i > 0 and i % 10 == 0:
-                    print(f"Embedding document {i}/{len(texts)}...")
-                    time.sleep(0.5)  # Rate limiting
-                embeddings.append(self._get_embedding(text))
-            return embeddings
-        
-        def embed_query(self, text: str) -> List[float]:
-            return self._get_embedding(text)
-    
-    return SimpleEmbeddings(api_key)
-
 def initialize_database():
     """Initialize the vector database and load manga data"""
     global db_mangas, mangas_df, embeddings
     
     print("Initializing database...")
     
-    # Check OpenAI API key
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("ERROR: OPENAI_API_KEY not found!")
-        return False
-    else:
-        print(f"OpenAI API key found: {api_key[:10]}...")
-    
-    # Download files if needed
-    download_data_files()
-    
-    # Check if required files exist
-    if not os.path.exists("data/mangas_with_emotions.csv"):
-        print("ERROR: mangas_with_emotions.csv not found")
-        return False
-    
-    # Check if tagged_description.txt exists and has content
-    txt_needs_download = False
-    if os.path.exists("data/tagged_description.txt"):
-        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
-            content = f.read()
-            if len(content.strip()) == 0:
-                print("Tagged description file is empty, deleting and redownloading...")
-                os.remove("data/tagged_description.txt")
-                txt_needs_download = True
-    else:
-        txt_needs_download = True
-    
-    # Download the file if needed
-    if txt_needs_download:
-        print("Downloading tagged_description.txt from Google Drive...")
-        try:
-            urllib.request.urlretrieve(
-                "https://drive.google.com/uc?export=download&id=1-GRSmhZZFRvz2_Lm0yH6omdIfce4MTwF",
-                "data/tagged_description.txt"
-            )
-            print("Successfully downloaded tagged_description.txt")
-        except Exception as e:
-            print(f"Failed to download tagged_description.txt: {e}")
-            # Create it from CSV as fallback
-            print("Creating tagged_description.txt from CSV as fallback...")
-            try:
-                temp_df = pd.read_csv("data/mangas_with_emotions.csv")
-                with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
-                    created_count = 0
-                    for idx, row in temp_df.iterrows():
-                        if pd.notna(row.get("description")) and str(row.get("description")).strip():
-                            uid = row.get('uid', idx)
-                            title = str(row.get('title', '')).strip()
-                            desc = str(row['description']).replace('\n', ' ').strip()[:500]
-                            tags = str(row.get('tags', '')).strip()
-                            
-                            if desc:
-                                searchable_text = f"{uid}: {title} {desc} {tags}"
-                                f.write(f"{searchable_text}\n")
-                                created_count += 1
-                                
-                            if created_count >= 100:
-                                break
-                print(f"Created fallback tagged_description.txt with {created_count} entries")
-            except Exception as e2:
-                print(f"Could not create fallback: {e2}")
-                return False
-    
     try:
+        # Download files if needed
+        download_success = download_data_files()
+        if not download_success:
+            print("Warning: Could not download all files")
+        
         # Load manga data
         print("Loading manga CSV...")
         mangas_df = pd.read_csv("data/mangas_with_emotions.csv")
@@ -219,105 +106,73 @@ def initialize_database():
         else:
             mangas_df["large_cover"] = "/static/cover-not-found.jpg"
         
-        # Load documents for vector store
-        print("Loading text documents...")
-        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f.readlines() if line.strip()]
+        # Check OpenAI API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print("WARNING: OPENAI_API_KEY not found - search functionality limited")
+            return True  # Still return True so dataframe is available
         
-        print(f"Found {len(lines)} documents")
-        
-        # Create documents - LIMIT TO 50 FOR TESTING
-        documents = []
-        for line in lines[:50]:  # Start with just 50 documents
-            if line.strip():
-                uid_match = re.match(r'^(\d+):', line)
-                if uid_match:
-                    uid = uid_match.group(1)
-                    doc = Document(
-                        page_content=line.strip(),
-                        metadata={"source": "tagged_description.txt", "uid": uid}
-                    )
-                    documents.append(doc)
-        
-        print(f"Created {len(documents)} documents for embedding")
-        
-        if len(documents) == 0:
-            print("ERROR: No documents to embed!")
-            return False
-        
-        # Try different embedding approaches
-        print("Attempting to create embeddings...")
-        
-        # First try langchain-openai
-        try:
-            from langchain_openai import OpenAIEmbeddings
-            embeddings = OpenAIEmbeddings(
-                openai_api_key=api_key,
-                model="text-embedding-3-small"
-            )
-            print("Created embeddings with langchain-openai")
-        except Exception as e:
-            print(f"langchain-openai failed: {e}")
-            
-            # Try langchain-community
+        # Try to load and process documents for vector store
+        if os.path.exists("data/tagged_description.txt"):
+            print("Loading text documents...")
             try:
-                from langchain_community.embeddings import OpenAIEmbeddings
-                embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-                print("Created embeddings with langchain-community")
-            except Exception as e2:
-                print(f"langchain-community failed: {e2}")
+                with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f.readlines() if line.strip()]
                 
-                # Fallback to custom wrapper
-                try:
-                    print("Using custom embeddings wrapper...")
-                    embeddings = create_embeddings_wrapper(api_key)
-                    print("Created custom embeddings wrapper")
-                except Exception as e3:
-                    print(f"Custom wrapper failed: {e3}")
-                    return False
-        
-        # Create vector store with minimal documents
-        print("Creating vector store...")
-        try:
-            # Start with just 10 documents to test
-            test_docs = documents[:10]
-            db_mangas = Chroma.from_documents(
-                test_docs,
-                embedding=embeddings,
-                ids=[str(i) for i in range(len(test_docs))]
-            )
-            print(f"Created vector store with {len(test_docs)} documents")
-            
-            # If successful, add more documents in small batches
-            if len(documents) > 10:
-                for i in range(10, min(len(documents), 50), 10):
-                    batch = documents[i:i+10]
-                    texts = [doc.page_content for doc in batch]
-                    metadatas = [doc.metadata for doc in batch]
-                    ids = [str(j) for j in range(i, i+len(batch))]
+                print(f"Found {len(lines)} documents")
+                
+                if len(lines) > 0:
+                    # Create documents - limit for testing
+                    documents = []
+                    for line in lines[:50]:  # Start with just 50
+                        if line.strip():
+                            uid_match = re.match(r'^(\d+):', line)
+                            if uid_match:
+                                uid = uid_match.group(1)
+                                doc = Document(
+                                    page_content=line.strip(),
+                                    metadata={"source": "tagged_description.txt", "uid": uid}
+                                )
+                                documents.append(doc)
                     
-                    print(f"Adding batch {i//10}...")
-                    try:
-                        db_mangas.add_texts(texts=texts, metadatas=metadatas, ids=ids)
-                    except Exception as e:
-                        print(f"Failed to add batch: {e}")
-                        break
-            
-            print("Vector store created successfully!")
-            
-        except Exception as e:
-            print(f"Error creating vector store: {e}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            return False
+                    print(f"Created {len(documents)} documents for embedding")
+                    
+                    if len(documents) > 0:
+                        # Try to create embeddings
+                        try:
+                            # Try different approaches
+                            try:
+                                from langchain_openai import OpenAIEmbeddings
+                                embeddings = OpenAIEmbeddings(
+                                    openai_api_key=api_key,
+                                    model="text-embedding-3-small"
+                                )
+                                print("Created OpenAI embeddings")
+                            except ImportError:
+                                from langchain_community.embeddings import OpenAIEmbeddings
+                                embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+                                print("Created community embeddings")
+                            
+                            # Create vector store
+                            db_mangas = Chroma.from_documents(
+                                documents[:10],  # Start with just 10
+                                embedding=embeddings,
+                                ids=[str(i) for i in range(min(10, len(documents)))]
+                            )
+                            print("Vector store created successfully!")
+                            
+                        except Exception as e:
+                            print(f"Could not create embeddings: {e}")
+                            print("Search will use fallback method")
+                
+            except Exception as e:
+                print(f"Error processing documents: {e}")
         
-        print("Database initialized successfully!")
+        print("Database initialization complete!")
         return True
         
     except Exception as e:
         print(f"Error initializing database: {e}")
-        import traceback
-        print(f"Full traceback: {traceback.format_exc()}")
         return False
 
 def retrieve_semantic_recommendations(
@@ -325,50 +180,78 @@ def retrieve_semantic_recommendations(
     initial_top_k: int = 50,
     final_top_k: int = 16
 ) -> pd.DataFrame:
-    """Retrieve manga recommendations based on semantic search"""
+    """Retrieve manga recommendations based on semantic search or fallback"""
     
-    if db_mangas is None or mangas_df is None:
+    if mangas_df is None:
         return pd.DataFrame()
     
-    try:
-        # Perform similarity search with metadata
-        recs = db_mangas.similarity_search_with_score(query, k=initial_top_k)
-        manga_uids = []
-        
-        for doc, score in recs:
-            # First try to get UID from metadata
-            if 'uid' in doc.metadata:
-                uid = int(doc.metadata['uid'])
-                manga_uids.append(uid)
-            else:
-                # Fallback: extract from content
-                content = doc.page_content.strip()
-                match = re.match(r'^(\d+):', content)
-                if match:
-                    uid = int(match.group(1))
+    # If vector database is available, use it
+    if db_mangas is not None:
+        try:
+            # Perform similarity search
+            recs = db_mangas.similarity_search(query, k=initial_top_k)
+            manga_uids = []
+            
+            for doc in recs:
+                # Try to get UID from metadata
+                if 'uid' in doc.metadata:
+                    uid = int(doc.metadata['uid'])
                     manga_uids.append(uid)
+                else:
+                    # Extract from content
+                    content = doc.page_content.strip()
+                    match = re.match(r'^(\d+):', content)
+                    if match:
+                        uid = int(match.group(1))
+                        manga_uids.append(uid)
+            
+            # Get unique UIDs
+            seen = set()
+            unique_uids = []
+            for uid in manga_uids:
+                if uid not in seen and uid in mangas_df["uid"].values:
+                    seen.add(uid)
+                    unique_uids.append(uid)
+            
+            if unique_uids:
+                # Return manga details
+                manga_recs = mangas_df[mangas_df['uid'].isin(unique_uids)].head(final_top_k)
+                return manga_recs
+                
+        except Exception as e:
+            print(f"Error in semantic search: {e}")
+    
+    # Fallback: Simple text search on title and description
+    print("Using fallback search method")
+    query_lower = query.lower()
+    query_words = query_lower.split()
+    
+    # Score each manga based on keyword matches
+    scores = []
+    for idx, row in mangas_df.iterrows():
+        score = 0
+        title = str(row.get('title', '')).lower()
+        desc = str(row.get('description', '')).lower()
+        tags = str(row.get('tags', '')).lower()
         
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_uids = []
-        for uid in manga_uids:
-            if uid not in seen and uid in mangas_df["uid"].values:
-                seen.add(uid)
-                unique_uids.append(uid)
+        for word in query_words:
+            if word in title:
+                score += 3  # Title matches are more important
+            if word in desc:
+                score += 1
+            if word in tags:
+                score += 2
         
-        # Get manga details for the UIDs
-        if unique_uids:
-            # Preserve the order of results by using categorical
-            mangas_df['uid_cat'] = pd.Categorical(mangas_df['uid'], categories=unique_uids, ordered=True)
-            manga_recs = mangas_df[mangas_df['uid'].isin(unique_uids)].sort_values('uid_cat')
-            manga_recs = manga_recs.head(final_top_k).drop('uid_cat', axis=1)
-            return manga_recs
-        else:
-            return pd.DataFrame()
-        
-    except Exception as e:
-        print(f"Error in semantic search: {e}")
-        return pd.DataFrame()
+        scores.append(score)
+    
+    mangas_df['search_score'] = scores
+    results = mangas_df[mangas_df['search_score'] > 0].nlargest(final_top_k, 'search_score')
+    
+    # Clean up
+    if 'search_score' in mangas_df.columns:
+        mangas_df.drop('search_score', axis=1, inplace=True)
+    
+    return results
 
 @app.on_event("startup")
 async def startup_event():
@@ -390,7 +273,7 @@ async def root():
 async def search_manga(request: SearchRequest):
     """Search for manga based on semantic similarity to the query"""
     
-    if db_mangas is None or mangas_df is None:
+    if mangas_df is None:
         raise HTTPException(
             status_code=503,
             detail="Database not initialized. Please try again later."
@@ -415,14 +298,6 @@ async def search_manga(request: SearchRequest):
         # Convert to response format
         results = []
         for _, row in recommendations.iterrows():
-            # Process tags
-            tags = row.get("tags", "")
-            if pd.notna(tags) and tags:
-                # Clean up tags string
-                tags = str(tags).strip()
-            else:
-                tags = ""
-            
             manga = MangaResponse(
                 uid=int(row.get("uid", 0)),
                 title=str(row.get("title", "Unknown Title")),
@@ -430,7 +305,7 @@ async def search_manga(request: SearchRequest):
                 cover=str(row.get("large_cover", "/static/cover-not-found.jpg")),
                 rating=float(row.get("rating")) if pd.notna(row.get("rating")) else None,
                 year=int(row.get("year")) if pd.notna(row.get("year")) else None,
-                tags=tags
+                tags=str(row.get("tags", ""))
             )
             results.append(manga)
         
@@ -503,92 +378,7 @@ async def debug_status():
         "dataframe_info": {
             "rows": len(mangas_df) if mangas_df is not None else 0,
             "columns": list(mangas_df.columns) if mangas_df is not None else []
-        }
-    }
-
-@app.get("/debug/download-txt")
-async def download_txt():
-    """Force download tagged_description.txt from Google Drive"""
-    try:
-        # Delete existing file if it exists
-        if os.path.exists("data/tagged_description.txt"):
-            os.remove("data/tagged_description.txt")
-            
-        # Download from Google Drive
-        urllib.request.urlretrieve(
-            "https://drive.google.com/uc?export=download&id=1-GRSmhZZFRvz2_Lm0yH6omdIfce4MTwF",
-            "data/tagged_description.txt"
-        )
-        
-        # Verify content
-        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
-            content = f.read()
-            lines = [l for l in content.strip().split('\n') if l.strip()]
-        
-        return {
-            "success": True,
-            "file_size": len(content),
-            "lines_in_file": len(lines),
-            "sample": lines[0][:200] if lines else None
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/debug/recreate-txt")
-async def recreate_txt_file():
-    """Manually recreate the tagged_description.txt file"""
-    try:
-        if not os.path.exists("data/mangas_with_emotions.csv"):
-            return {"error": "CSV file not found"}
-        
-        temp_df = pd.read_csv("data/mangas_with_emotions.csv")
-        
-        # Delete existing file if it exists
-        if os.path.exists("data/tagged_description.txt"):
-            os.remove("data/tagged_description.txt")
-        
-        # Create new file
-        with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
-            created_count = 0
-            for idx, row in temp_df.iterrows():
-                if pd.notna(row.get("description")) and str(row.get("description")).strip():
-                    uid = row.get('uid', idx)
-                    title = str(row.get('title', '')).strip()
-                    desc = str(row['description']).replace('\n', ' ').strip()[:500]
-                    tags = str(row.get('tags', '')).strip()
-                    
-                    if desc:
-                        searchable_text = f"{uid}: {title} {desc} {tags}"
-                        f.write(f"{searchable_text}\n")
-                        created_count += 1
-                        
-                    if created_count >= 100:
-                        break
-        
-        # Verify content
-        with open("data/tagged_description.txt", "r") as f:
-            content = f.read()
-            lines = content.strip().split('\n')
-        
-        return {
-            "success": True,
-            "entries_created": created_count,
-            "file_size": len(content),
-            "lines_in_file": len(lines),
-            "sample": lines[0][:200] if lines else None
-        }
-        
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/debug/reinit")
-async def reinitialize():
-    """Manually trigger reinitialization"""
-    success = initialize_database()
-    return {
-        "success": success,
-        "database_loaded": db_mangas is not None,
-        "dataframe_loaded": mangas_df is not None
+        } if mangas_df is not None else {}
     }
 
 if __name__ == "__main__":
