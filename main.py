@@ -58,7 +58,8 @@ def download_data_files():
     
     files_to_download = {
         "data/mangas_cleaned.csv": "https://drive.google.com/uc?export=download&id=1TbS-JUhEX2aExdL1ELIorbI5ARuDWitS",
-        "data/mangas_with_emotions.csv": "https://drive.google.com/uc?export=download&id=1KdhLZYvoRtbrMV-wOqPGzqIAzJK7qDs2"
+        "data/mangas_with_emotions.csv": "https://drive.google.com/uc?export=download&id=1KdhLZYvoRtbrMV-wOqPGzqIAzJK7qDs2",
+        "data/tagged_description.txt": "https://drive.google.com/uc?export=download&id=1-GRSmhZZFRvz2_Lm0yH6omdIfce4MTwF"
     }
     
     for file_path, url in files_to_download.items():
@@ -152,25 +153,53 @@ def initialize_database():
         print("ERROR: mangas_with_emotions.csv not found")
         return False
     
-    # Create tagged_description.txt if it doesn't exist
-    if not os.path.exists("data/tagged_description.txt"):
-        print("Creating tagged_description.txt from CSV...")
+    # Check if tagged_description.txt exists and has content
+    txt_needs_download = False
+    if os.path.exists("data/tagged_description.txt"):
+        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+            content = f.read()
+            if len(content.strip()) == 0:
+                print("Tagged description file is empty, deleting and redownloading...")
+                os.remove("data/tagged_description.txt")
+                txt_needs_download = True
+    else:
+        txt_needs_download = True
+    
+    # Download the file if needed
+    if txt_needs_download:
+        print("Downloading tagged_description.txt from Google Drive...")
         try:
-            temp_df = pd.read_csv("data/mangas_with_emotions.csv")
-            with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
-                # Limit to first 100 for testing
-                for idx, row in temp_df.head(100).iterrows():
-                    if pd.notna(row.get("description")):
-                        uid = row.get('uid', idx)
-                        title = row.get('title', '')
-                        desc = str(row['description']).replace('\n', ' ').strip()[:500]
-                        tags = row.get('tags', '')
-                        searchable_text = f"{uid}: {title} {desc} {tags}"
-                        f.write(f"{searchable_text}\n")
-            print("Created tagged_description.txt")
+            urllib.request.urlretrieve(
+                "https://drive.google.com/uc?export=download&id=1-GRSmhZZFRvz2_Lm0yH6omdIfce4MTwF",
+                "data/tagged_description.txt"
+            )
+            print("Successfully downloaded tagged_description.txt")
         except Exception as e:
-            print(f"Could not create tagged_description.txt: {e}")
-            return False
+            print(f"Failed to download tagged_description.txt: {e}")
+            # Create it from CSV as fallback
+            print("Creating tagged_description.txt from CSV as fallback...")
+            try:
+                temp_df = pd.read_csv("data/mangas_with_emotions.csv")
+                with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
+                    created_count = 0
+                    for idx, row in temp_df.iterrows():
+                        if pd.notna(row.get("description")) and str(row.get("description")).strip():
+                            uid = row.get('uid', idx)
+                            title = str(row.get('title', '')).strip()
+                            desc = str(row['description']).replace('\n', ' ').strip()[:500]
+                            tags = str(row.get('tags', '')).strip()
+                            
+                            if desc:
+                                searchable_text = f"{uid}: {title} {desc} {tags}"
+                                f.write(f"{searchable_text}\n")
+                                created_count += 1
+                                
+                            if created_count >= 100:
+                                break
+                print(f"Created fallback tagged_description.txt with {created_count} entries")
+            except Exception as e2:
+                print(f"Could not create fallback: {e2}")
+                return False
     
     try:
         # Load manga data
@@ -476,6 +505,81 @@ async def debug_status():
             "columns": list(mangas_df.columns) if mangas_df is not None else []
         }
     }
+
+@app.get("/debug/download-txt")
+async def download_txt():
+    """Force download tagged_description.txt from Google Drive"""
+    try:
+        # Delete existing file if it exists
+        if os.path.exists("data/tagged_description.txt"):
+            os.remove("data/tagged_description.txt")
+            
+        # Download from Google Drive
+        urllib.request.urlretrieve(
+            "https://drive.google.com/uc?export=download&id=1-GRSmhZZFRvz2_Lm0yH6omdIfce4MTwF",
+            "data/tagged_description.txt"
+        )
+        
+        # Verify content
+        with open("data/tagged_description.txt", "r", encoding="utf-8") as f:
+            content = f.read()
+            lines = [l for l in content.strip().split('\n') if l.strip()]
+        
+        return {
+            "success": True,
+            "file_size": len(content),
+            "lines_in_file": len(lines),
+            "sample": lines[0][:200] if lines else None
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/recreate-txt")
+async def recreate_txt_file():
+    """Manually recreate the tagged_description.txt file"""
+    try:
+        if not os.path.exists("data/mangas_with_emotions.csv"):
+            return {"error": "CSV file not found"}
+        
+        temp_df = pd.read_csv("data/mangas_with_emotions.csv")
+        
+        # Delete existing file if it exists
+        if os.path.exists("data/tagged_description.txt"):
+            os.remove("data/tagged_description.txt")
+        
+        # Create new file
+        with open("data/tagged_description.txt", "w", encoding="utf-8") as f:
+            created_count = 0
+            for idx, row in temp_df.iterrows():
+                if pd.notna(row.get("description")) and str(row.get("description")).strip():
+                    uid = row.get('uid', idx)
+                    title = str(row.get('title', '')).strip()
+                    desc = str(row['description']).replace('\n', ' ').strip()[:500]
+                    tags = str(row.get('tags', '')).strip()
+                    
+                    if desc:
+                        searchable_text = f"{uid}: {title} {desc} {tags}"
+                        f.write(f"{searchable_text}\n")
+                        created_count += 1
+                        
+                    if created_count >= 100:
+                        break
+        
+        # Verify content
+        with open("data/tagged_description.txt", "r") as f:
+            content = f.read()
+            lines = content.strip().split('\n')
+        
+        return {
+            "success": True,
+            "entries_created": created_count,
+            "file_size": len(content),
+            "lines_in_file": len(lines),
+            "sample": lines[0][:200] if lines else None
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/debug/reinit")
 async def reinitialize():
