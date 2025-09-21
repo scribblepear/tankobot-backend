@@ -248,11 +248,12 @@ def initialize_database():
                     import json
                     import urllib.request
                     import urllib.parse
+                    import time
                     
                     url = "https://api.openai.com/v1/embeddings"
                     data = {
                         "model": "text-embedding-3-small",
-                        "input": text
+                        "input": text[:8000]  # Limit text length to avoid API errors
                     }
                     
                     req = urllib.request.Request(
@@ -261,9 +262,18 @@ def initialize_database():
                         headers=self.headers
                     )
                     
-                    with urllib.request.urlopen(req) as response:
-                        result = json.loads(response.read().decode('utf-8'))
-                        return result['data'][0]['embedding']
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        try:
+                            with urllib.request.urlopen(req, timeout=30) as response:
+                                result = json.loads(response.read().decode('utf-8'))
+                                return result['data'][0]['embedding']
+                        except Exception as e:
+                            if retry < max_retries - 1:
+                                print(f"Embedding retry {retry + 1}/{max_retries}: {e}")
+                                time.sleep(1)  # Brief pause before retry
+                            else:
+                                raise
                 
                 def embed_documents(self, texts: List[str]) -> List[List[float]]:
                     return [self._get_embedding(text) for text in texts]
@@ -296,12 +306,62 @@ def initialize_database():
         
         # Create vector store
         print("Creating vector store...")
-        db_mangas = Chroma.from_documents(
-            documents,
-            embedding=embeddings,
-            ids=[doc.metadata["id"] for doc in documents]
-        )
-        print("Vector store created successfully!")
+        try:
+            # Disable Chroma telemetry to avoid warnings
+            import chromadb
+            chromadb.config.Settings(anonymized_telemetry=False)
+            
+            # Create the vector store with batching for large document sets
+            print(f"Creating Chroma database with {len(documents)} documents...")
+            
+            # Process in smaller batches to avoid timeout
+            batch_size = 100
+            all_ids = [doc.metadata["id"] for doc in documents]
+            
+            if len(documents) > batch_size:
+                print(f"Processing in batches of {batch_size}...")
+                # Create initial store with first batch
+                first_batch_docs = documents[:batch_size]
+                first_batch_ids = all_ids[:batch_size]
+                
+                db_mangas = Chroma.from_documents(
+                    first_batch_docs,
+                    embedding=embeddings,
+                    ids=first_batch_ids
+                )
+                print(f"Created initial vector store with {batch_size} documents")
+                
+                # Add remaining documents in batches
+                for i in range(batch_size, len(documents), batch_size):
+                    batch_docs = documents[i:i+batch_size]
+                    batch_ids = all_ids[i:i+batch_size]
+                    print(f"Adding batch {i//batch_size + 1}/{len(documents)//batch_size + 1}...")
+                    
+                    # Extract texts and metadatas
+                    texts = [doc.page_content for doc in batch_docs]
+                    metadatas = [doc.metadata for doc in batch_docs]
+                    
+                    db_mangas.add_texts(
+                        texts=texts,
+                        metadatas=metadatas,
+                        ids=batch_ids
+                    )
+                print("All batches added successfully!")
+            else:
+                # Small dataset, process all at once
+                db_mangas = Chroma.from_documents(
+                    documents,
+                    embedding=embeddings,
+                    ids=all_ids
+                )
+                print("Vector store created successfully!")
+            
+        except Exception as e:
+            print(f"Error creating vector store: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            last_error = f"Vector store creation failed: {str(e)}"
+            raise
         
         print("Database initialized successfully!")
         return True
@@ -495,6 +555,23 @@ async def debug_files():
         }
     }
     return files_info
+
+@app.get("/test/simple-search")
+async def test_simple_search():
+    """Test if the database is working with a simple search"""
+    if db_mangas is None:
+        return {"error": "Database not initialized", "loaded": False}
+    
+    try:
+        # Try a simple search
+        results = db_mangas.similarity_search("action adventure", k=3)
+        return {
+            "loaded": True,
+            "test_search_results": len(results),
+            "sample": results[0].page_content[:100] if results else None
+        }
+    except Exception as e:
+        return {"error": str(e), "loaded": True}
 
 @app.get("/debug/check-data")
 async def check_data():
