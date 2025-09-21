@@ -74,36 +74,61 @@ def download_data_files():
         if not os.path.exists(file_path):
             print(f"Downloading {file_path} from {url}...")
             try:
-                # Use requests for all files to handle redirects properly
-                response = requests.get(url, stream=True, allow_redirects=True)
-                response.raise_for_status()
+                # Try using curl or wget for better GitHub compatibility
+                import subprocess
                 
-                # Get total size if available
-                total_size = int(response.headers.get('content-length', 0))
-                
-                # Write file in chunks
-                with open(file_path, 'wb') as f:
-                    downloaded = 0
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total_size > 0:
-                                percent = (downloaded / total_size) * 100
-                                print(f"Progress: {percent:.1f}%", end='\r')
-                
-                print(f"\nSuccessfully downloaded {file_path}")
+                # Try curl first (more commonly available)
+                try:
+                    result = subprocess.run(
+                        ["curl", "-L", "-o", file_path, url],
+                        capture_output=True,
+                        text=True,
+                        timeout=300  # 5 minute timeout
+                    )
+                    if result.returncode == 0:
+                        print(f"Successfully downloaded with curl")
+                    else:
+                        raise Exception(f"Curl failed: {result.stderr}")
+                except (FileNotFoundError, Exception) as e:
+                    # Fallback to wget
+                    try:
+                        result = subprocess.run(
+                            ["wget", "-O", file_path, url],
+                            capture_output=True,
+                            text=True,
+                            timeout=300
+                        )
+                        if result.returncode == 0:
+                            print(f"Successfully downloaded with wget")
+                        else:
+                            raise Exception(f"Wget failed: {result.stderr}")
+                    except (FileNotFoundError, Exception) as e2:
+                        # Final fallback to requests with different approach
+                        print("Curl/wget not available, using requests...")
+                        session = requests.Session()
+                        session.headers.update({
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        })
+                        
+                        response = session.get(url, stream=True, allow_redirects=True)
+                        response.raise_for_status()
+                        
+                        with open(file_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                                if chunk:
+                                    f.write(chunk)
+                        print(f"Successfully downloaded with requests")
                 
                 # Verify file size
                 file_size = os.path.getsize(file_path)
                 print(f"File size: {file_size / 1024 / 1024:.2f} MB")
                 
-                # For text files, verify content
-                if file_path.endswith('.txt'):
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        sample = f.read(1000)
-                        lines = sample.count('\n')
-                        print(f"Text file preview: {lines} lines in first 1KB")
+                # Verify text file content
+                if file_path.endswith('.txt') and file_size < 1000:
+                    print(f"WARNING: Text file seems too small ({file_size} bytes)")
+                    # Delete the bad file so it re-downloads next time
+                    os.remove(file_path)
+                    raise Exception(f"Downloaded file too small, likely corrupted")
                         
             except Exception as e:
                 print(f"Failed to download {file_path}: {e}")
