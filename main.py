@@ -190,42 +190,92 @@ def initialize_database():
                 "/static/cover-not-found.jpg",
                 mangas_df["large_cover"]
             )
-        else:
-            mangas_df["large_cover"] = "/static/cover-not-found.jpg"
-        
-        # Try to load pre-built vector database if it exists
-        api_key = os.getenv("OPENAI_API_KEY")
-        chroma_dir = "data/chroma_db"
-        # Replace your embeddings loading section (around line 192-227) with:
+        # Replace the chroma loading section (around lines 192-227) with this:
 
-        # Try to load pre-built vector database if it exists
-        api_key = os.getenv("OPENAI_API_KEY")
-        
-        # Check multiple possible locations for chroma_db
-        possible_paths = [
-            "data/chroma_db",
-            "chroma_db",
-            "data/chroma_db/chroma_db"
+# Try to load pre-built vector database if it exists
+api_key = os.getenv("OPENAI_API_KEY")
+
+# Check multiple possible locations for chroma_db
+# Look for both directory structures and direct sqlite files
+possible_paths = [
+    "data/chroma_db",           # Standard directory structure
+    "chroma_db",                # Root directory
+    "data/chroma_db/chroma_db", # Nested structure
+    "data"                      # Direct extraction to data/ (your case)
+]
+
+chroma_dir = None
+for path in possible_paths:
+    # Check if it's a directory with chroma files
+    if os.path.exists(path) and os.path.isdir(path):
+        # Look for chroma.sqlite3 or other chroma files
+        chroma_files = [
+            os.path.join(path, "chroma.sqlite3"),
+            os.path.join(path, "index"),
+            os.path.join(path, "chroma.sqlite3-wal"),
+            os.path.join(path, "chroma.sqlite3-shm")
         ]
-        
-        chroma_dir = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                chroma_dir = path
-                print(f"Found chroma_db at: {path}")
-                break
-        
-        if api_key and chroma_dir:
+        if any(os.path.exists(f) for f in chroma_files):
+            chroma_dir = path
+            print(f"Found chroma_db at: {path}")
+            # Debug: show what files are in there
             try:
-                print("\nLoading pre-built vector database...")
-                from langchain_openai import OpenAIEmbeddings
-                from langchain_community.vectorstores import Chroma
-                
-                # Load embeddings function (needed for searching)
-                embeddings = OpenAIEmbeddings(
-                    openai_api_key=api_key,
-                    model="text-embedding-3-small"
-                )
+                files_found = [f for f in os.listdir(path) if 'chroma' in f.lower()]
+                print(f"Chroma files found: {files_found}")
+            except:
+                pass
+            break
+
+if api_key and chroma_dir:
+    try:
+        print(f"\nLoading pre-built vector database from: {chroma_dir}...")
+        from langchain_openai import OpenAIEmbeddings
+        from langchain_community.vectorstores import Chroma
+        
+        # Load embeddings function (needed for searching)
+        embeddings = OpenAIEmbeddings(
+            openai_api_key=api_key,
+            model="text-embedding-3-small"
+        )
+        
+        # Load the existing Chroma database
+        db_mangas = Chroma(
+            persist_directory=chroma_dir,
+            embedding_function=embeddings
+        )
+        
+        # Test it works
+        test_results = db_mangas.similarity_search("test", k=1)
+        print(f"✓ Vector database loaded successfully!")
+        print(f"✓ Database contains pre-computed embeddings")
+        print(f"✓ Test search returned {len(test_results)} results")
+        
+    except Exception as e:
+        print(f"✗ Failed to load vector database: {e}")
+        print(f"Attempting to debug the issue...")
+        
+        # Debug information
+        try:
+            import glob
+            all_chroma_files = glob.glob("data/**/chroma*", recursive=True)
+            print(f"All chroma-related files found: {all_chroma_files}")
+            
+            if os.path.exists("data/chroma.sqlite3"):
+                file_size = os.path.getsize("data/chroma.sqlite3")
+                print(f"chroma.sqlite3 size: {file_size / 1024 / 1024:.2f} MB")
+            except Exception as debug_e:
+                print(f"Debug failed: {debug_e}")
+        
+                db_mangas = None
+            else:
+                reasons = []
+                if not api_key:
+                    reasons.append("no OpenAI API key")
+                if not chroma_dir:
+                    reasons.append("chroma_db not found in any expected location")
+                print(f"Skipping embeddings ({', '.join(reasons)})")
+                print("Will use text-based search instead")
+                db_mangas = None
                 
                 # Load the existing Chroma database
                 db_mangas = Chroma(
