@@ -220,10 +220,10 @@ def initialize_database():
             reasons = []
             if not api_key:
                 reasons.append("no OpenAI API key")
-            if not os.path.exists(tagged_file):
+            if not os.path.exists(chroma_dir):
                 reasons.append("tagged_description.txt not found")
             if not os.path.exists(chroma_dir):
-    reasons.append("chroma_db directory not found")
+                reasons.append("chroma_db directory not found")
             print(f"Skipping embeddings ({', '.join(reasons)})")
             print("Will use text-based search instead")
             db_mangas = None
