@@ -141,8 +141,8 @@ def download_data_files():
                         
             except Exception as e:
                 print(f"Failed to download {file_path}: {e}")
-                # Don't fail completely if chroma_db fails - can fall back to text search
-                if "chroma_db" not in file_path and "mangas_with_emotions" in file_path:
+                # Only fail if critical CSV files can't download
+                if "mangas_with_emotions.csv" in file_path:
                     return False
     
     # Verify critical files exist
@@ -150,6 +150,7 @@ def download_data_files():
         print("Critical file mangas_with_emotions.csv missing!")
         return False
     
+    print("All required files downloaded successfully!")
     return True
 
 def initialize_database():
