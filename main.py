@@ -129,11 +129,18 @@ def download_data_files():
                     # Delete the bad file so it re-downloads next time
                     os.remove(file_path)
                     raise Exception(f"Downloaded file too small, likely corrupted")
-                if file_path.endswith('.zip'):
+               if file_path.endswith('.zip'):
                     print(f"Extracting {file_path}...")
                     with zipfile.ZipFile(file_path, 'r') as zip_ref:
                         zip_ref.extractall("data/")
                     print(f"Extracted successfully")
+                    
+                    # Debug: List what was extracted
+                    import glob
+                    extracted_files = glob.glob("data/**/chroma.sqlite3", recursive=True)
+                    if extracted_files:
+                        print(f"Found database at: {extracted_files[0]}")
+                    
                     os.remove(file_path)
                         
             except Exception as e:
@@ -189,44 +196,60 @@ def initialize_database():
         # Try to load pre-built vector database if it exists
         api_key = os.getenv("OPENAI_API_KEY")
         chroma_dir = "data/chroma_db"
+        # Replace your embeddings loading section (around line 192-227) with:
+
+# Try to load pre-built vector database if it exists
+api_key = os.getenv("OPENAI_API_KEY")
+
+# Check multiple possible locations for chroma_db
+possible_paths = [
+    "data/chroma_db",
+    "chroma_db",
+    "data/chroma_db/chroma_db"
+]
+
+chroma_dir = None
+for path in possible_paths:
+    if os.path.exists(path):
+        chroma_dir = path
+        print(f"Found chroma_db at: {path}")
+        break
+
+if api_key and chroma_dir:
+    try:
+        print("\nLoading pre-built vector database...")
+        from langchain_openai import OpenAIEmbeddings
+        from langchain_community.vectorstores import Chroma
         
-        if api_key and os.path.exists(chroma_dir):
-            try:
-                print("\nLoading pre-built vector database...")
-                from langchain_openai import OpenAIEmbeddings
-                from langchain_community.vectorstores import Chroma
-                
-                # Load embeddings function (needed for searching)
-                embeddings = OpenAIEmbeddings(
-                    openai_api_key=api_key,
-                    model="text-embedding-3-small"
-                )
-                
-                # Load the existing Chroma database
-                db_mangas = Chroma(
-                    persist_directory=chroma_dir,
-                    embedding_function=embeddings
-                )
-                
-                # Test it works
-                test_results = db_mangas.similarity_search("test", k=1)
-                print(f"✓ Vector database loaded successfully!")
-                print(f"✓ Database contains pre-computed embeddings")
-                
-            except Exception as e:
-                print(f"✗ Failed to load vector database: {e}")
-                db_mangas = None
-        else:
-            reasons = []
-            if not api_key:
-                reasons.append("no OpenAI API key")
-            if not os.path.exists(chroma_dir):
-                reasons.append("tagged_description.txt not found")
-            if not os.path.exists(chroma_dir):
-                reasons.append("chroma_db directory not found")
-            print(f"Skipping embeddings ({', '.join(reasons)})")
-            print("Will use text-based search instead")
-            db_mangas = None
+        # Load embeddings function (needed for searching)
+        embeddings = OpenAIEmbeddings(
+            openai_api_key=api_key,
+            model="text-embedding-3-small"
+        )
+        
+        # Load the existing Chroma database
+        db_mangas = Chroma(
+            persist_directory=chroma_dir,
+            embedding_function=embeddings
+        )
+        
+        # Test it works
+        test_results = db_mangas.similarity_search("test", k=1)
+        print(f"✓ Vector database loaded successfully!")
+        print(f"✓ Database contains pre-computed embeddings")
+        
+    except Exception as e:
+        print(f"✗ Failed to load vector database: {e}")
+        db_mangas = None
+else:
+    reasons = []
+    if not api_key:
+        reasons.append("no OpenAI API key")
+    if not chroma_dir:
+        reasons.append("chroma_db not found in any expected location")
+    print(f"Skipping embeddings ({', '.join(reasons)})")
+    print("Will use text-based search instead")
+    db_mangas = None
         
         print("\n" + "=" * 50)
         print("DATABASE INITIALIZATION COMPLETE")
