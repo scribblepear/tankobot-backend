@@ -129,15 +129,12 @@ def download_data_files():
                     # Delete the bad file so it re-downloads next time
                     os.remove(file_path)
                     raise Exception(f"Downloaded file too small, likely corrupted")
-                # Extract the zip file
-                print(f"Extracting {file_path}...")
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    # Extract to data directory
-                    zip_ref.extractall("data/")
-                print(f"Extracted chroma_db successfully")
-                
-                # Remove the zip file to save space
-                os.remove(file_path)
+                if file_path.endswith('.zip'):
+                    print(f"Extracting {file_path}...")
+                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                        zip_ref.extractall("data/")
+                    print(f"Extracted successfully")
+                    os.remove(file_path)
                         
             except Exception as e:
                 print(f"Failed to download {file_path}: {e}")
@@ -225,8 +222,8 @@ def initialize_database():
                 reasons.append("no OpenAI API key")
             if not os.path.exists(tagged_file):
                 reasons.append("tagged_description.txt not found")
-            elif os.path.getsize(tagged_file) == 0:
-                reasons.append("tagged_description.txt is empty")
+            if not os.path.exists(chroma_dir):
+    reasons.append("chroma_db directory not found")
             print(f"Skipping embeddings ({', '.join(reasons)})")
             print("Will use text-based search instead")
             db_mangas = None
