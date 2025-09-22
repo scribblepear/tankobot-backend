@@ -129,7 +129,7 @@ def download_data_files():
                     # Delete the bad file so it re-downloads next time
                     os.remove(file_path)
                     raise Exception(f"Downloaded file too small, likely corrupted")
-               if file_path.endswith('.zip'):
+                if file_path.endswith('.zip'):
                     print(f"Extracting {file_path}...")
                     with zipfile.ZipFile(file_path, 'r') as zip_ref:
                         zip_ref.extractall("data/")
