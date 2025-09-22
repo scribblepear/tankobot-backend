@@ -60,9 +60,10 @@ def download_data_files():
     import urllib.request
     import requests
     import zipfile
+    import subprocess
     os.makedirs("data", exist_ok=True)
     
-    # UPDATE THESE URLs after uploading all files to GitHub Releases
+    # UPDATE THESE URLs to match your actual GitHub repository
     files_to_download = {
         "data/mangas_cleaned.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_cleaned.csv",
         "data/mangas_with_emotions.csv": "https://github.com/scribblepear/tankobot-backend/releases/download/v1.0/mangas_with_emotions.csv",
